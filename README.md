@@ -18,9 +18,8 @@ The script asks which formats to build and whether to include
 Intel, checks for Apple's Command Line Tools and CMake 3.22+ (offering to
 install them), builds, and installs for the current user:
 
-| | |
-AU, VST3 | `~/Library/Audio/Plug-Ins/` |
-Factory cards | `~/Library/Application Support/CHIMPO/Factory Cards/<TAPE, WAVE TEMPO>` |
+`AU, VST3` | `~/Library/Audio/Plug-Ins/` |
+`Factory cards` | `~/Library/Application Support/CHIMPO/Factory Cards/<TAPE, WAVE TEMPO>` |
 
 `./build.sh au vst3 [--universal]` skips the questions. The first build
 downloads JUCE 9.0.4 and takes a few minutes; afterwards the source folder is
