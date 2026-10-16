@@ -1,6 +1,5 @@
-// Port of TEMPO 1.0's chompi_main.cpp. Its globals become Firmware members and
-// its interrupt handlers become methods the scheduler in Process() calls; the
-// logic is otherwise line for line. Divergences are marked EMULATOR.
+// Port of TEMPO 1.0's chompi_main.cpp: globals become Firmware members,
+// interrupt handlers methods that Process() schedules.
 #include "chompi/Machine.h"
 
 #include <algorithm>
@@ -158,6 +157,9 @@ class TempoMachine final : public Machine
     bool CaptureSession(Session& out) override;
     void RestoreSession(const Session& session) override;
     void SetClockSync(bool sync) override;
+    bool PlanImport(int button, ImportTarget& out) override;
+    void CompleteImports(std::vector<ImportTarget> imports) override;
+    bool IsReady() override;
 
   private:
     struct Firmware;
@@ -171,6 +173,7 @@ class TempoMachine final : public Machine
     void        CheckSDCardMounted();
     void        DrainPanelEvents();
     void        ApplySession();
+    void        ApplyImports();
 
     std::unique_ptr<Firmware> fw_;
     uint64_t                  blocks_ = 0;
@@ -178,6 +181,8 @@ class TempoMachine final : public Machine
     SessionState session_;
     bool         session_pending_ = false;
     int          sync_pending_    = -1; // -1 none, else the clockMode to set
+
+    std::vector<ImportTarget> imports_; // pending until the first block after boot
 };
 
 /** The Daisy Seed's 64 MB SDRAM, zeroed (ZeroSDRAM()). calloc leaves pages
@@ -718,6 +723,56 @@ void TempoMachine::ApplySession()
         f.fx.SetInputSource(InputSource(s.input));
 }
 
+bool TempoMachine::PlanImport(int button, ImportTarget& out)
+{
+    const auto* white = std::find(std::begin(panel::kWhiteKeys), std::end(panel::kWhiteKeys), button);
+    if(white == std::end(panel::kWhiteKeys))
+        return false;
+    const int key  = int(white - std::begin(panel::kWhiteKeys)) + 1;
+    out            = {};
+    out.maxSeconds = 10; // SampleManager's slot size; the firmware cuts longer files there too
+    out.slot       = key;
+    if(key == 15)
+    {
+        out.file  = "Buffer/buffer.wav";
+        out.label = "the buffer";
+        return true;
+    }
+    out.mode  = int(fw_->fx.getEngine());
+    out.file  = out.mode == CHROMATIC ? "Chromatic/chroma_a" + std::to_string(key) + ".wav"
+                                      : "Slice/slice_a" + std::to_string(key) + ".wav";
+    out.label = (out.mode == CHROMATIC ? "Chromatic " : "Slice ") + std::to_string(key);
+    return true;
+}
+
+void TempoMachine::CompleteImports(std::vector<ImportTarget> imports)
+{
+    imports_ = std::move(imports);
+}
+
+/** A slot gets default settings; the first is selected for the engine on
+ *  show, as its key in the shift layer does (MenuPage::SetVoiceSlot()). */
+void TempoMachine::ApplyImports()
+{
+    auto& f = *fw_;
+    for(const auto& t : imports_)
+        if(t.slot <= 14)
+        {
+            for(int c = 0; c < chompi::PresetManager::kMaxControls; c++)
+                f.presets.SetValue(f.presets.getDefault(size_t(c)), size_t(t.mode), size_t(t.slot), size_t(c));
+            f.presets.Save(size_t(t.mode), size_t(t.slot));
+        }
+    const auto& first = imports_.front();
+    if(first.slot == 15 || first.mode == int(f.fx.getEngine()))
+        f.ui.menu_page_.SetVoiceSlot(size_t(first.slot - 1));
+    imports_.clear();
+}
+
+bool TempoMachine::IsReady()
+{
+    return fw_->rainbow_done && !fw_->ui.InRainbows();
+}
+
 void TempoMachine::SetClockSync(bool sync)
 {
     sync_pending_ = sync ? SYNC : FREE;
@@ -739,6 +794,8 @@ void TempoMachine::Process(const float* const* in, float* const* out)
             fw_->cManager.mode_ = sync_pending_;
             sync_pending_       = -1;
         }
+        if(!imports_.empty())
+            ApplyImports();
     }
 
     DrainPanelEvents();

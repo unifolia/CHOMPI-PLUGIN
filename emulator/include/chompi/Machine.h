@@ -6,15 +6,13 @@
 // and one pass of the main loop. Firmware time advances only through Process(),
 // so a render depends on the blocks and inputs fed to it, not on wall-clock
 // speed.
-//
-// The firmwares define the same class names differently, so each is compiled
-// and prelinked on its own (CMakeLists.txt); only its factory crosses over.
 #pragma once
 #include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "chompi/Panel.h"
 
@@ -46,6 +44,22 @@ struct PanelEvent
 /** Front-panel state a DAW session restores, as named values; the hardware
  *  forgets it at power off. Each firmware defines its own names. */
 using Session = std::map<std::string, std::string>;
+
+/** Audio the unit keeps only in RAM, by the firmware's names (TAPE: "buffer",
+ *  the CHIMPO buffer, and "looper"): interleaved stereo 16-bit at 48 kHz. */
+using Recordings = std::map<std::string, std::vector<int16_t>>;
+
+/** Where audio dropped on a panel key goes: a card file or a recording, as
+ *  48 kHz 16-bit stereo. */
+struct ImportTarget
+{
+    std::string              file;      // card path, or
+    std::string              recording; // a Recordings name
+    std::vector<std::string> obsolete;  // card files to delete with it
+    double                   maxSeconds = 0;
+    std::string              label; // e.g. "Jammi a3"
+    int                      mode = 0, bank = 0, slot = 0; // the firmware's, for CompleteImports()
+};
 
 class Machine
 {
@@ -86,6 +100,31 @@ class Machine
     /** Applied at the start of the first block after boot has finished. Names
      *  the firmware doesn't know, and missing ones, take defaults. */
     virtual void RestoreSession(const Session& session) = 0;
+
+    /** Sizes (int16 values) of what CaptureRecordings() would copy now: the
+     *  recordings that differ from power-on. Cheap. */
+    virtual void RecordingSizes(std::map<std::string, size_t>& out) { out.clear(); }
+
+    /** Copies them into out, reusing its vectors' capacity, so a caller that
+     *  pre-sizes them from RecordingSizes() keeps allocation out of the copy.
+     *  While a restore is pending, the restored ones. */
+    virtual void CaptureRecordings(Recordings& out) { out.clear(); }
+
+    /** Applied with the session (before it); a recording missing here returns
+     *  to its power-on state. */
+    virtual void RestoreRecordings(Recordings) {}
+
+    /** Where audio dropped on `button` (Panel.h) goes, given what the panel
+     *  shows; false if that key takes none. */
+    virtual bool PlanImport(int, ImportTarget&) { return false; }
+
+    /** After a restart with imported audio in place, applied after the
+     *  session: what the firmware does with a new sample in a slot (default
+     *  settings), selecting the first. */
+    virtual void CompleteImports(std::vector<ImportTarget>) {}
+
+    /** Booted and past the boot animation: takes input as after a power-on wait. */
+    virtual bool IsReady() { return IsBooted(); }
 
     /** Puts the firmware's clock in sync mode (follow MIDI clock and
      *  start/stop on the input) or back to its own tempo, as its panel would.

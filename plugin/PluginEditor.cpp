@@ -1,10 +1,13 @@
 #include "PluginEditor.h"
 
+#include "AudioImport.h"
+
 using namespace juce;
 using namespace panel_ui;
 namespace pnl = emu::panel;
 
-ChompiEditor::ChompiEditor(ChompiProcessor& p) : AudioProcessorEditor(p), processor_(p), input_(p)
+ChompiEditor::ChompiEditor(ChompiProcessor& p)
+: AudioProcessorEditor(p), processor_(p), input_(p), audioExtensions_(audio_import::wildcard().removeCharacters("*"))
 {
     const auto savedSize = processor_.getEditorSize(); // resized() overwrites it below
 
@@ -19,7 +22,6 @@ ChompiEditor::ChompiEditor(ChompiProcessor& p) : AudioProcessorEditor(p), proces
         canvas_.addAndMakeVisible(c);
     };
 
-    // LEDs
     for(int i = 0; i < pnl::kNumPthLeds; i++)
     {
         const auto style = i == pnl::kLedLooperRev || i == pnl::kLedLooperFwd ? Led::Style::Small
@@ -29,7 +31,6 @@ ChompiEditor::ChompiEditor(ChompiProcessor& p) : AudioProcessorEditor(p), proces
         place(*leds_.back(), Layout::pthLed(i));
     }
 
-    // Keys
     auto addKey = [&](int button, Key::Style style, int smt, Point<float> centre) {
         keys_.push_back(std::make_unique<Key>(input_, button, style, smt));
         keyByButton_[size_t(button)] = keys_.back().get();
@@ -43,8 +44,7 @@ ChompiEditor::ChompiEditor(ChompiProcessor& p) : AudioProcessorEditor(p), proces
     addKey(pnl::kPlayKey, Key::Style::Play, -1, Layout::kPlayKey);
     addKey(pnl::kLoopKey, Key::Style::Loop, -1, Layout::kLoopKey);
 
-    // Encoders: drag, scroll, click to push. Pixels per detent suit TAPE's
-    // step sizes; the others' are similar.
+    // Pixels per detent suit TAPE's step sizes; the others' are similar.
     const std::pair<int, float> encoders[] = {{pnl::kEncSpeed, 1.f}, {pnl::kEncStart, 2.f}, {pnl::kEncEnd, 2.f},
                                               {pnl::kEncMagic, 4.f}, {pnl::kEncLooper, 1.f}, {pnl::kEncVolume, 4.f}};
     for(const auto& [encoder, pixelsPerDetent] : encoders)
@@ -81,6 +81,13 @@ ChompiEditor::ChompiEditor(ChompiProcessor& p) : AudioProcessorEditor(p), proces
     cardWarning_.setMinimumHorizontalScale(0.8f);
     cardWarning_.setBounds(780, 4, settings_.getX() - 4 - 780, 22);
     canvas_.addChildComponent(cardWarning_);
+
+    status_.setFont(FontOptions(12.f));
+    status_.setColour(Label::textColourId, Colour(0xff6c6a69));
+    status_.setJustificationType(Justification::centredRight);
+    status_.setMinimumHorizontalScale(0.7f);
+    status_.setBounds(cardWarning_.getBounds());
+    canvas_.addChildComponent(status_);
 
     setResizable(true, true);
     setResizeLimits(kWidth * 6 / 10, kHeight * 6 / 10, kWidth * 2, kHeight * 2);
@@ -127,6 +134,12 @@ void ChompiEditor::timerCallback()
         applyTooltips(processor_.getFirmware());
     if(processor_.isRunning() != wasRunning_ || processor_.isCardMissing() != wasMissing_)
         updateStatus();
+    if(statusUntil_ != 0 && Time::getMillisecondCounter() > statusUntil_)
+    {
+        statusUntil_ = 0;
+        status_.setVisible(false);
+        updateStatus();
+    }
 
     ChompiProcessor::Leds leds;
     processor_.readLeds(leds);
@@ -156,11 +169,90 @@ void ChompiEditor::updateStatus()
                                         : String("Inserting SD card..."));
 
     const bool warn = wasRunning_ && wasMissing_;
-    cardWarning_.setVisible(warn);
+    cardWarning_.setVisible(warn && !status_.isVisible());
     cardWarning_.setText(warn ? "SD card folder not found: using the default card" : "", dontSendNotification);
     cardWarning_.setTooltip(warn ? processor_.getCardFolder().getFullPathName()
                                        + " wasn't found. Reconnect it and choose Reload SD Card, or choose another folder."
                                  : String());
+}
+
+int ChompiEditor::keyAt(int x, int y) const
+{
+    const auto p = canvas_.getLocalPoint(this, Point<int>(x, y));
+    for(const auto& key : keys_)
+        if(key->getBounds().contains(p) && key->hitTest(p.x - key->getX(), p.y - key->getY()))
+            return key->button();
+    return -1;
+}
+
+StringArray ChompiEditor::audioFiles(const StringArray& files) const
+{
+    StringArray audio;
+    for(const auto& file : files)
+        if(File(file).existsAsFile() && File(file).hasFileExtension(audioExtensions_))
+            audio.add(file);
+    return audio;
+}
+
+void ChompiEditor::clearDropTargets()
+{
+    for(auto& key : keys_)
+        key->setDropTarget(false);
+    dropButton_ = kNoDrag;
+}
+
+void ChompiEditor::showStatus(const String& text, double seconds)
+{
+    status_.setText(text, dontSendNotification);
+    status_.setVisible(text.isNotEmpty());
+    statusUntil_ = seconds > 0 ? Time::getMillisecondCounter() + uint32_t(seconds * 1000) : 0;
+    updateStatus();
+}
+
+bool ChompiEditor::isInterestedInFileDrag(const StringArray& files)
+{
+    return !audioFiles(files).isEmpty() && !processor_.planImport(pnl::kWhiteKeys[0], 1).empty();
+}
+
+void ChompiEditor::fileDragEnter(const StringArray& files, int x, int y)
+{
+    fileDragMove(files, x, y);
+}
+
+void ChompiEditor::fileDragMove(const StringArray& files, int x, int y)
+{
+    const int button = keyAt(x, y);
+    if(button == dropButton_)
+        return;
+    clearDropTargets();
+    dropButton_ = button;
+    const auto plan = button >= 0 ? processor_.planImport(button, audioFiles(files).size())
+                                  : std::vector<ChompiProcessor::ImportPlan>();
+    if(plan.empty())
+    {
+        showStatus(button >= 0 ? "That key takes no audio" : "Drop on a key to load into its slot", 0);
+        return;
+    }
+    for(const auto& [key, target] : plan)
+        keyByButton_[size_t(key)]->setDropTarget(true);
+    const String first(plan.front().target.label);
+    showStatus(plan.size() == 1 ? "Drop to load into " + first
+                                : "Drop to load " + String(int(plan.size())) + " files into " + first + " to "
+                                      + String(plan.back().target.label),
+               0);
+}
+
+void ChompiEditor::fileDragExit(const StringArray&)
+{
+    clearDropTargets();
+    showStatus({}, 0);
+}
+
+void ChompiEditor::filesDropped(const StringArray& files, int x, int y)
+{
+    const int button = keyAt(x, y);
+    clearDropTargets();
+    showStatus(button >= 0 ? processor_.importAudio(audioFiles(files), button) : String("Drop on a key to load into its slot"), 6);
 }
 
 void ChompiEditor::showFirmwareMenu()
@@ -282,19 +374,18 @@ void ChompiEditor::FirmwareButton::mouseUp(const MouseEvent& e)
         onClick();
 }
 
-/** What each control does in the running firmware: its normal function, then
- *  the shift layer (each firmware's NormalPage.h and MenuPage.h; WAVE's
- *  Sequencer.h, TEMPO's ArpeggiatorSequencer.h). */
+/** From each firmware's NormalPage.h and MenuPage.h, WAVE's Sequencer.h and
+ *  TEMPO's ArpeggiatorSequencer.h. */
 void ChompiEditor::applyTooltips(emu::Firmware firmware)
 {
     shownFirmware_ = firmware;
 
     struct Tips
     {
-        const char* black;          // normal function of the black keys
-        const char* blackShift[10]; // shift layer, left to right
-        const char* white;          // normal function of the white keys
-        const char* whiteShift;     // shift: "%d" is the key's number
+        const char* black;
+        const char* blackShift[10]; // left to right
+        const char* white;
+        const char* whiteShift;     // "%d" is the key's number
         const char* whiteShift15;
         const char* chompi;
         const char* play;

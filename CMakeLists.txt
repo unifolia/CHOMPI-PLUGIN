@@ -123,7 +123,6 @@ endif()
 # Plugin
 # ---------------------------------------------------------------------------
 if(CHIMPO_BUILD_PLUGIN)
-    # Point FETCHCONTENT_SOURCE_DIR_JUCE at a local checkout to skip the download.
     include(FetchContent)
     FetchContent_Declare(JUCE
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
@@ -135,8 +134,7 @@ if(CHIMPO_BUILD_PLUGIN)
         PRODUCT_NAME "CHIMPO"
         COMPANY_NAME "CHIMPO"
         BUNDLE_ID "io.github.chimpo.plugin"
-        # Kept from before the CHIMPO name: hosts find the plugin in saved
-        # projects by these codes.
+        # Never change: hosts find the plugin in saved projects by these codes.
         PLUGIN_MANUFACTURER_CODE Cdaw
         PLUGIN_CODE Tap2
         FORMATS ${CHIMPO_FORMATS}
@@ -151,9 +149,11 @@ if(CHIMPO_BUILD_PLUGIN)
     target_sources(Chimpo PRIVATE
         plugin/PluginProcessor.cpp
         plugin/PluginEditor.cpp
+        plugin/AudioImport.cpp
         plugin/PanelComponents.cpp
         plugin/OutputStage.cpp
-        plugin/RateAdapter.cpp)
+        plugin/RateAdapter.cpp
+        plugin/RecordingCodec.cpp)
 
     target_compile_definitions(Chimpo PRIVATE
         JUCE_WEB_BROWSER=0

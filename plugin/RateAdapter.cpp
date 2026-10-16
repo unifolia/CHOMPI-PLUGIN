@@ -271,3 +271,47 @@ void RateAdapter::processChunk(const float* inL, const float* inR, float* const*
     outQueue_.popFrames(n, out);
     hostOut_ += n;
 }
+
+RateAdapter::ToFirmwareRate::ToFirmwareRate(double fromRate)
+: resampling_(std::abs(fromRate - kFirmwareRate) > 0.5), ratio_(kFirmwareRate / fromRate)
+{
+    if(resampling_)
+    {
+        resampler_.reset(fromRate, kFirmwareRate);
+        skip_ = size_t(std::lround(resampler_.half / resampler_.step)); // outputs before input time 0
+    }
+}
+
+void RateAdapter::ToFirmwareRate::push(const float* lr, size_t frames, std::vector<float>& out)
+{
+    inFrames_ += frames;
+    if(!resampling_)
+    {
+        out.insert(out.end(), lr, lr + 2 * frames);
+        return;
+    }
+    auto emit = [this, &out](const float* frame) {
+        if(emitted_++ < skip_)
+            return;
+        out.insert(out.end(), frame, frame + 2);
+        kept_++;
+    };
+    for(size_t i = 0; i < frames; i++)
+        resampler_.push(lr + 2 * i, emit);
+}
+
+void RateAdapter::ToFirmwareRate::finish(std::vector<float>& out)
+{
+    if(!resampling_)
+        return;
+    const auto  want      = size_t(std::ceil(double(inFrames_) * ratio_ - 1e-9));
+    const float silence[] = {0.f, 0.f};
+    auto        emit      = [this, &out, want](const float* frame) {
+        if(emitted_++ < skip_ || kept_ >= want)
+            return;
+        out.insert(out.end(), frame, frame + 2);
+        kept_++;
+    };
+    while(kept_ < want)
+        resampler_.push(silence, emit);
+}

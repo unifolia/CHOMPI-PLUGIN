@@ -1,7 +1,6 @@
-// Reading and writing emu::Session values. Formats match what the plugin
-// stored before sessions were per firmware (JUCE XML attributes), so older
-// projects load: bools "1"/"0" (any of 1/t/y reads true), knobs as a
-// comma-separated list.
+// emu::Session value formats. Fixed: older TAPE projects store them as JUCE
+// XML attributes. Bools "1"/"0" (any of 1/t/y reads true), lists
+// comma-separated.
 #pragma once
 #include <cstdio>
 #include <cstdlib>

@@ -111,8 +111,7 @@ VirtualCard::~VirtualCard()
         FlushKey(key);
 }
 
-/** The root and its subfolders (TEMPO keeps samples in folders), one level
- *  deep. */
+// Subfolders: TEMPO keeps samples in folders.
 void VirtualCard::Load()
 {
     Load("");
@@ -255,6 +254,23 @@ bool VirtualCard::IsDir(const char* path)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return FolderExists(KeyFor(path));
+}
+
+bool VirtualCard::MakeDir(const char* path)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::string           key = KeyFor(path);
+    if(FolderExists(key))
+        return true;
+    if(!ParentOf(key).empty()) // Load() reads one level deep
+        return false;
+    const std::string name = Normalize(path);
+    std::error_code   ec;
+    fs::create_directories(folder_ / name, ec);
+    if(ec)
+        return false;
+    dirs_[key] = name;
+    return true;
 }
 
 bool VirtualCard::FolderExists(const std::string& key) const

@@ -1,9 +1,7 @@
-// What the firmwares' hardware.h files share, as emulated: the switch chain,
-// encoders, toggle and inert power management. Each firmware's shim
-// (emulator/shim/<name>/hardware.h) derives its Hardware class from this,
-// adding the MIDI interface its code calls. The physical inputs (switch
-// levels, encoder detents) are driven by the emulator; the power-management
-// chip (MP2722), USB switching and codec setup are inert.
+// What the firmwares' hardware.h files share, as emulated; each
+// emulator/shim/<name>/hardware.h derives Hardware from it, adding that
+// firmware's MIDI interface. The power-management chip (MP2722), USB switching
+// and codec setup are inert.
 #pragma once
 #include <algorithm>
 #include "daisy_seed.h"

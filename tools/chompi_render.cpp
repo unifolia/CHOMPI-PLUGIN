@@ -15,6 +15,8 @@
 //   sync <1 | 0>         the firmware's clock sync mode (TEMPO)
 //   input <off | sine <hz> <gain>>            line input signal
 //   leds                 print LED state
+//   recordings [dir]     print the RAM recordings (TAPE); with dir, write <dir>/<name>.raw
+//   restore [<name> <file.raw>]...   restore recordings (int16 stereo); unnamed ones reset
 // CHOMPI_HP=1 renders the headphone output instead of the line output.
 // Note: the firmware writes options.json/presets.json at boot; use a copy.
 #include <cmath>
@@ -24,6 +26,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "chompi/Machine.h"
@@ -248,6 +251,36 @@ int main(int argc, char** argv)
         }
         else if(op == "leds")
             runner.PrintLeds();
+        else if(op == "recordings")
+        {
+            std::string dir;
+            in >> dir;
+            emu::Recordings recordings;
+            machine.CaptureRecordings(recordings);
+            for(const auto& [name, samples] : recordings)
+            {
+                const auto hash = std::hash<std::string_view>{}(
+                    std::string_view(reinterpret_cast<const char*>(samples.data()), samples.size() * 2));
+                std::printf("  %s: %zu frames, hash %016zx\n", name.c_str(), samples.size() / 2, hash);
+                if(!dir.empty())
+                    std::ofstream(dir + "/" + name + ".raw", std::ios::binary)
+                        .write(reinterpret_cast<const char*>(samples.data()), std::streamsize(samples.size() * 2));
+            }
+        }
+        else if(op == "restore")
+        {
+            emu::Recordings recordings;
+            std::string     name, file;
+            while(in >> name >> file)
+            {
+                std::ifstream raw(file, std::ios::binary | std::ios::ate);
+                auto&         samples = recordings[name];
+                samples.resize(size_t(raw.tellg()) / 2);
+                raw.seekg(0);
+                raw.read(reinterpret_cast<char*>(samples.data()), std::streamsize(samples.size() * 2));
+            }
+            machine.RestoreRecordings(std::move(recordings));
+        }
         else
             std::fprintf(stderr, "unknown command: %s\n", op.c_str());
     }

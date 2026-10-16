@@ -7,7 +7,7 @@
 #include "PanelComponents.h"
 #include "PluginProcessor.h"
 
-class ChompiEditor : public juce::AudioProcessorEditor, private juce::Timer
+class ChompiEditor : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget, private juce::Timer
 {
   public:
     explicit ChompiEditor(ChompiProcessor&);
@@ -16,8 +16,20 @@ class ChompiEditor : public juce::AudioProcessorEditor, private juce::Timer
     void paint(juce::Graphics&) override;
     void resized() override;
 
+    // Audio files dropped on a key go into its slot (ChompiProcessor::importAudio()).
+    bool isInterestedInFileDrag(const juce::StringArray& files) override;
+    void fileDragEnter(const juce::StringArray& files, int x, int y) override;
+    void fileDragMove(const juce::StringArray& files, int x, int y) override;
+    void fileDragExit(const juce::StringArray& files) override;
+    void filesDropped(const juce::StringArray& files, int x, int y) override;
+
   private:
     void timerCallback() override;
+    int  keyAt(int x, int y) const;
+    juce::StringArray audioFiles(const juce::StringArray& files) const;
+    void clearDropTargets();
+    /** Over the card warning for `seconds`, or until replaced if 0. */
+    void showStatus(const juce::String& text, double seconds);
     void showSettingsMenu();
     void showFirmwareMenu();
     void updateStatus();
@@ -30,7 +42,6 @@ class ChompiEditor : public juce::AudioProcessorEditor, private juce::Timer
         void                  mouseUp(const juce::MouseEvent&) override;
     };
 
-    /** "TAPE 2.0 firmware" with a chevron; opens the firmware menu. */
     struct FirmwareButton : juce::Component, juce::SettableTooltipClient
     {
         std::function<void()> onClick;
@@ -55,7 +66,12 @@ class ChompiEditor : public juce::AudioProcessorEditor, private juce::Timer
     std::unique_ptr<panel_ui::Toggle>             toggle_;
     std::array<panel_ui::Key*, 40>                keyByButton_{};
     FirmwareButton                                firmwareButton_;
-    juce::Label                                   cardWarning_; // beside the card menu
+    juce::Label                                   cardWarning_;
+    juce::Label                                   status_; // same place, takes precedence
+    uint32_t                                      statusUntil_ = 0;
+    int                                           dropButton_  = kNoDrag; // key under a drag
+    static constexpr int                          kNoDrag      = -2;
+    const juce::String                            audioExtensions_;
     SettingsButton                                settings_;
     juce::TooltipWindow                           tooltips_{this, 700};
     std::unique_ptr<juce::FileChooser>            chooser_;

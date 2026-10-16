@@ -5,6 +5,7 @@
 #include <atomic>
 #include <bitset>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -47,7 +48,6 @@ class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockR
 
     // ---- Any thread but the audio thread ----
 
-    /** Panel interaction from the editor. */
     void post(const emu::PanelEvent& event);
 
     struct Leds
@@ -68,8 +68,8 @@ class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockR
      *  live. Called by the editor's timer. */
     void idleTick();
 
-    /** The firmware the unit runs. Switching power-cycles it on that
-     *  firmware's default card: each firmware has its own card layout. */
+    /** Switching power-cycles the unit on that firmware's default card: each
+     *  firmware has its own card layout. */
     emu::Firmware getFirmware() const { return firmware_.load(); }
     void          setFirmware(emu::Firmware firmware);
     static juce::String firmwareName(emu::Firmware firmware); // "TAPE 2.0"
@@ -97,11 +97,25 @@ class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockR
     bool getMidiOmni() const { return midiOmni_.load(); }
     void setMidiOmni(bool omni) { midiOmni_.store(omni); }
 
-    /** TEMPO follows the host's tempo and transport: the plugin sends it MIDI
-     *  clock and start/stop, and puts it in sync mode. Needs a host that
-     *  reports a tempo. */
+    /** TEMPO follows host tempo and transport (followHost()); needs a host
+     *  that reports a tempo. */
     bool getHostSync() const { return hostSync_.load(); }
     void setHostSync(bool sync) { hostSync_.store(sync); }
+
+    struct ImportPlan
+    {
+        int               button;
+        emu::ImportTarget target;
+    };
+    /** The keys that numFiles audio files dropped on `button` fill: it, then
+     *  the white keys after it while they take card slots. Empty if it takes
+     *  none. */
+    std::vector<ImportPlan> planImport(int button, int numFiles);
+
+    /** Converts the files and restarts the unit with them where planImport()
+     *  puts them, keeping the session and recordings; the restart skips the
+     *  boot animation. Returns what the panel says about it. */
+    juce::String importAudio(const juce::StringArray& files, int button);
 
     juce::Point<int> getEditorSize() const { return {editorWidth_.load(), editorHeight_.load()}; }
     void             setEditorSize(juce::Point<int> size)
@@ -122,9 +136,23 @@ class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockR
     /** TEMPO's clock and transport for this block, in time order; 0 when not
      *  following the host. Audio thread. */
     int followHost(int numSamples, SyncEvent* events);
-    void startMachine(const juce::File& folder, bool restoreFactory);
+    struct CardWrite
+    {
+        std::string              path;
+        std::vector<uint8_t>     bytes;
+        std::vector<std::string> obsolete; // deleted first
+    };
+    static void writeCardFile(emu::VirtualCard& card, const CardWrite& write);
+
+    void startMachine(const juce::File& folder, bool restoreFactory, bool fastBoot = false);
     void stopMachine();
+    /** The pending toggle, session, recordings and imports; under stateMutex_. */
+    void applyPending(emu::Machine& machine);
+    /** Under stateMutex_: false when the live machine has no session yet. */
+    bool captureLive(emu::Session& session, emu::Recordings& recordings);
     std::shared_ptr<emu::Machine> currentMachine() const;
+    /** The recordings a state carries, decoded; primes encoded_ with them. */
+    emu::Recordings readRecordings(const juce::XmlElement& xml, const void* data, int sizeInBytes);
 
     // Locking: the audio thread only ever try-locks machineLock_, which guards
     // machine_. Every other thread reaches the machine through live_ under
@@ -139,6 +167,20 @@ class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockR
     juce::File                    cardFolder_;
     emu::Session                  pendingSession_; // from setStateInformation, for the next machine
     bool                          hasPendingSession_ = false;
+    emu::Recordings               pendingRecordings_;
+    bool                          hasPendingRecordings_ = false;
+    std::vector<CardWrite>        pendingWrites_; // made by the next loader before boot
+    std::vector<emu::ImportTarget> pendingImports_;
+
+    // FLAC of the recordings last saved or loaded, by name: a save re-encodes
+    // only what changed.
+    struct EncodedRecording
+    {
+        size_t            size = 0, hash = 0;
+        juce::MemoryBlock flac;
+    };
+    std::mutex                              encodedMutex_;
+    std::map<std::string, EncodedRecording> encoded_;
 
     // Starting and stopping machines (and the loader thread) are serialised.
     std::recursive_mutex lifecycleMutex_;
@@ -168,7 +210,7 @@ class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockR
     // Host sync (audio thread): the clock's position in pulses (24 per
     // beat), and whether TEMPO has been sent a start.
     double  clockPhase_       = 0;
-    int64_t nextPulse_        = 0; // next pulse to send
+    int64_t nextPulse_        = 0;
     bool   tempoStarted_      = false;
     int    syncedGeneration_  = -1;
     bool   syncFollowing_     = false;

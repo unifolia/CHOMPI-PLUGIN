@@ -110,7 +110,6 @@ if [ -z "$formats" ]; then
     fi
 fi
 
-# Deduplicate, keeping order.
 formats=$(printf '%s' "${formats#;}" | tr ';' '\n' | awk '!seen[$0]++' | paste -sd ';' -)
 if [ -n "$universal" ]; then archs="arm64;x86_64"; else archs="$chip"; fi
 

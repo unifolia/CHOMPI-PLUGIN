@@ -1,4 +1,3 @@
-// FatFs calls made by the firmware, served by the executing machine's card.
 #include "fatfs.h"
 
 #include <cstring>

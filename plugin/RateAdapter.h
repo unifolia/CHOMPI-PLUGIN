@@ -99,4 +99,24 @@ class RateAdapter
     Resampler<kOutputs> outResampler_;
 
     std::vector<float> blockIn_, blockOut_;
+
+  public:
+    /** The same filter offline: interleaved stereo at fromRate to 48 kHz, its
+     *  delay removed. */
+    class ToFirmwareRate
+    {
+      public:
+        explicit ToFirmwareRate(double fromRate);
+        /** Appends the output for these frames to out. */
+        void push(const float* lr, size_t frames, std::vector<float>& out);
+        /** Flushes the filter: out then holds ceil(input frames * 48000 /
+         *  fromRate) frames. */
+        void finish(std::vector<float>& out);
+
+      private:
+        bool         resampling_;
+        double       ratio_;
+        Resampler<2> resampler_;
+        size_t       inFrames_ = 0, skip_ = 0, emitted_ = 0, kept_ = 0;
+    };
 };

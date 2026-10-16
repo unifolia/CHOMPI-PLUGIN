@@ -1,5 +1,12 @@
 #include "PluginProcessor.h"
+#include "AudioImport.h"
 #include "PluginEditor.h"
+#include "RecordingCodec.h"
+
+#include <algorithm>
+#include <optional>
+#include <string_view>
+#include <utility>
 
 namespace
 {
@@ -9,6 +16,15 @@ constexpr uint32_t kIdleAfterMs    = 150; // host considered stopped after this 
 constexpr uint32_t kMaxIdleStepMs  = 100;
 
 constexpr const char* kCardFiles = "*.wav;*.json";
+
+// A second of stereo: room for a recording to grow between sizing and copying.
+constexpr size_t kRecordingSlack = 2 * emu::Machine::kSampleRate;
+
+size_t hashOf(const std::vector<int16_t>& samples)
+{
+    return std::hash<std::string_view>{}(
+        std::string_view(reinterpret_cast<const char*>(samples.data()), samples.size() * sizeof(int16_t)));
+}
 
 bool hasCardFiles(const juce::File& folder)
 {
@@ -48,6 +64,28 @@ juce::Colour unscale(uint32_t rgb, int fullScale)
 emu::PanelEvent toggleEvent(bool play)
 {
     return {emu::PanelEvent::Type::Toggle, 0, int16_t(play)};
+}
+
+/** Runs a machine nobody else holds through its boot animation, as fast as it
+ *  computes (measured on an M2: 6 s of boot in 50-90 ms), so a restart for an
+ *  import is over at once. Pending restores apply on the way. */
+void bootThrough(emu::Machine& machine, const std::atomic<bool>& cancelled)
+{
+    constexpr int kMaxBlocks = 20 * emu::Machine::kSampleRate / emu::Machine::kBlockSize; // a card that never finishes
+
+    juce::ScopedNoDenormals noDenormals;
+    float        silence[emu::Machine::kNumInputs][emu::Machine::kBlockSize]  = {};
+    float        scratch[emu::Machine::kNumOutputs][emu::Machine::kBlockSize] = {};
+    const float* in[emu::Machine::kNumInputs]   = {silence[0], silence[1], silence[2], silence[3]};
+    float*       out[emu::Machine::kNumOutputs] = {scratch[0], scratch[1], scratch[2], scratch[3]};
+    uint8_t      msg[3];
+    for(int block = 0; block < kMaxBlocks && !cancelled && !machine.IsReady(); block++)
+    {
+        machine.Process(in, out);
+        while(machine.ReceiveMidi(msg))
+        {
+        }
+    }
 }
 
 /** Puts a full-velocity four-note chord at the default volume near -4 dBFS
@@ -139,7 +177,24 @@ void ChompiProcessor::stopMachine()
     // machine on a card writes the card's pending changes.
 }
 
-void ChompiProcessor::startMachine(const juce::File& folder, bool restoreFactory)
+void ChompiProcessor::applyPending(emu::Machine& machine)
+{
+    machine.Post(toggleEvent(togglePlay_.load()));
+    if(hasPendingSession_)
+    {
+        machine.RestoreSession(pendingSession_);
+        hasPendingSession_ = false;
+    }
+    if(hasPendingRecordings_)
+    {
+        machine.RestoreRecordings(std::exchange(pendingRecordings_, {}));
+        hasPendingRecordings_ = false;
+    }
+    if(!pendingImports_.empty())
+        machine.CompleteImports(std::exchange(pendingImports_, {}));
+}
+
+void ChompiProcessor::startMachine(const juce::File& folder, bool restoreFactory, bool fastBoot)
 {
     const std::lock_guard<std::recursive_mutex> lifecycle(lifecycleMutex_);
     stopMachine();
@@ -151,7 +206,7 @@ void ChompiProcessor::startMachine(const juce::File& folder, bool restoreFactory
 
     // Copying and loading the card and booting take a moment; the audio thread
     // outputs silence until the machine is published.
-    loader_ = std::thread([this, requested = folder, restoreFactory, firmware = firmware_.load()] {
+    loader_ = std::thread([this, requested = folder, restoreFactory, fastBoot, firmware = firmware_.load()] {
         // A folder that's gone (project from another Mac, renamed, drive not
         // mounted) would otherwise be recreated as a blank card: run on the
         // default card instead, while the project keeps asking for it.
@@ -165,23 +220,36 @@ void ChompiProcessor::startMachine(const juce::File& folder, bool restoreFactory
         if(restoreFactory || (active == defaultFolder && !hasCardFiles(active)))
             copyFactoryCard(firmware, active);
         auto card = emu::VirtualCard::Open(active.getFullPathName().toStdString());
+        {
+            std::vector<CardWrite> writes;
+            {
+                const std::lock_guard<std::mutex> lock(stateMutex_);
+                writes = std::exchange(pendingWrites_, {});
+            }
+            for(const auto& write : writes)
+                writeCardFile(*card, write);
+        }
         if(loaderCancelled_)
             return;
         std::shared_ptr<emu::Machine> machine = emu::Machine::Create(firmware, std::move(card));
         if(machine == nullptr) // not built in: the unit stays off
             return;
 
+        if(fastBoot)
+        {
+            {
+                const std::lock_guard<std::mutex> lock(stateMutex_);
+                applyPending(*machine);
+            }
+            bootThrough(*machine, loaderCancelled_);
+        }
+
         // Under stateMutex_, so the toggle and a restored session can't slip
         // between this machine's creation and its publication.
         const std::lock_guard<std::mutex> lock(stateMutex_);
         if(loaderCancelled_)
             return;
-        machine->Post(toggleEvent(togglePlay_.load()));
-        if(hasPendingSession_)
-        {
-            machine->RestoreSession(pendingSession_);
-            hasPendingSession_ = false;
-        }
+        applyPending(*machine);
         {
             const juce::SpinLock::ScopedLockType audio(machineLock_);
             machine_ = machine;
@@ -192,6 +260,107 @@ void ChompiProcessor::startMachine(const juce::File& folder, bool restoreFactory
     });
 }
 
+void ChompiProcessor::writeCardFile(emu::VirtualCard& card, const CardWrite& write)
+{
+    if(const auto slash = write.path.rfind('/'); slash != std::string::npos)
+        card.MakeDir(write.path.substr(0, slash).c_str());
+    for(const auto& name : write.obsolete)
+        card.Unlink(name.c_str());
+    uint32_t  size   = 0;
+    const int handle = card.OpenFile(write.path.c_str(), true, true, &size);
+    if(handle != 0)
+        card.Write(handle, 0, write.bytes.data(), uint32_t(write.bytes.size()));
+}
+
+std::vector<ChompiProcessor::ImportPlan> ChompiProcessor::planImport(int button, int numFiles)
+{
+    std::vector<ImportPlan>           plan;
+    const std::lock_guard<std::mutex> lock(stateMutex_);
+    if(live_ == nullptr || numFiles < 1)
+        return plan;
+    const juce::SpinLock::ScopedLockType audio(machineLock_);
+    emu::ImportTarget                    target;
+    if(!live_->PlanImport(button, target))
+        return plan;
+    plan.push_back({button, target});
+
+    const auto* keys  = std::begin(emu::panel::kWhiteKeys);
+    const auto* end   = std::end(emu::panel::kWhiteKeys);
+    auto        isSlot = [](const emu::ImportTarget& t) { return !t.file.empty() && t.slot >= 1 && t.slot <= 14; };
+    if(!isSlot(target))
+        return plan;
+    for(const auto* key = std::find(keys, end, button) + 1; key < end && int(plan.size()) < numFiles; key++)
+    {
+        if(!live_->PlanImport(*key, target) || !isSlot(target))
+            break;
+        plan.push_back({*key, target});
+    }
+    return plan;
+}
+
+juce::String ChompiProcessor::importAudio(const juce::StringArray& files, int button)
+{
+    juce::StringArray sorted(files);
+    sorted.sortNatural();
+    const auto plan = planImport(button, sorted.size());
+    if(plan.empty())
+        return "The unit can't take audio there now.";
+
+    std::vector<CardWrite>         writes;
+    std::vector<emu::ImportTarget> imported;
+    emu::Recordings                recordings;
+    juce::StringArray              unreadable;
+    bool                           cut = false;
+    for(size_t i = 0; i < plan.size(); i++)
+    {
+        const juce::File     file(sorted[int(i)]);
+        const auto&          target = plan[i].target;
+        std::vector<int16_t> samples;
+        bool                 longer = false;
+        if(!audio_import::read(file, target.maxSeconds, samples, longer))
+        {
+            unreadable.add(file.getFileName());
+            continue;
+        }
+        cut = cut || longer;
+        if(!target.recording.empty())
+            recordings[target.recording] = std::move(samples);
+        else
+            writes.push_back({target.file, audio_import::toWav(samples), target.obsolete});
+        imported.push_back(target);
+    }
+
+    juce::String message;
+    if(!imported.empty())
+    {
+        const std::lock_guard<std::recursive_mutex> lifecycle(lifecycleMutex_);
+        {
+            const std::lock_guard<std::mutex> lock(stateMutex_);
+            if(live_ != nullptr)
+            {
+                pendingRecordings_ = {};
+                hasPendingSession_ = captureLive(pendingSession_, pendingRecordings_);
+            }
+            for(auto& [name, samples] : recordings)
+                pendingRecordings_[name] = std::move(samples);
+            hasPendingRecordings_ = true;
+            pendingWrites_        = std::move(writes);
+            pendingImports_       = imported;
+        }
+        startMachine(getCardFolder(), false, true);
+
+        const juce::String first(imported.front().label), last(imported.back().label);
+        message = (imported.size() == 1 ? "Loaded " + juce::File(sorted[0]).getFileName()
+                                        : "Loaded " + juce::String(int(imported.size())) + " files")
+                  + " into " + first + (imported.size() > 1 ? " to " + last : juce::String());
+        if(cut)
+            message << " (cut to " << juce::String(plan.front().target.maxSeconds, 0) << " s)";
+    }
+    if(!unreadable.isEmpty())
+        message << (message.isEmpty() ? "" : "; ") << "can't read " << unreadable.joinIntoString(", ");
+    return message;
+}
+
 void ChompiProcessor::setFirmware(emu::Firmware firmware)
 {
     const std::lock_guard<std::recursive_mutex> lifecycle(lifecycleMutex_);
@@ -200,7 +369,10 @@ void ChompiProcessor::setFirmware(emu::Firmware firmware)
     firmware_.store(firmware);
     {
         const std::lock_guard<std::mutex> lock(stateMutex_);
-        hasPendingSession_ = false; // the other firmware's
+        hasPendingSession_ = hasPendingRecordings_ = false; // the other firmware's
+        pendingRecordings_.clear();
+        pendingWrites_.clear();
+        pendingImports_.clear();
     }
     startMachine(defaultCardFolder(firmware), false);
 }
@@ -522,20 +694,39 @@ juce::AudioProcessorEditor* ChompiProcessor::createEditor()
     return new ChompiEditor(*this);
 }
 
+bool ChompiProcessor::captureLive(emu::Session& session, emu::Recordings& recordings)
+{
+    std::map<std::string, size_t> sizes;
+    bool                          haveSession;
+    {
+        // Brief: copies a few dozen values while the audio thread waits.
+        const juce::SpinLock::ScopedLockType audio(machineLock_);
+        haveSession = live_->CaptureSession(session);
+        live_->RecordingSizes(sizes);
+    }
+    // While the recordings copy, a block the audio thread tries to render is
+    // skipped, so their pages are touched beforehand: on an M2 a full TAPE
+    // buffer (31.7 MB) copies in ~1.4 ms into touched memory, 3-5 ms into fresh.
+    for(const auto& [name, size] : sizes)
+        recordings[name].assign(size + kRecordingSlack, 0);
+    const juce::SpinLock::ScopedLockType audio(machineLock_);
+    live_->CaptureRecordings(recordings);
+    return haveSession;
+}
+
 void ChompiProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    juce::File   folder;
-    emu::Session session;
-    bool         haveSession = false;
+    juce::File      folder;
+    emu::Session    session;
+    emu::Recordings recordings;
+    bool            haveSession = false;
     {
         const std::lock_guard<std::mutex> lock(stateMutex_);
         folder = cardFolder_;
         if(live_ != nullptr)
-        {
-            // Brief: copies a few dozen values while the audio thread waits.
-            const juce::SpinLock::ScopedLockType audio(machineLock_);
-            haveSession = live_->CaptureSession(session);
-        }
+            haveSession = captureLive(session, recordings);
+        else if(hasPendingRecordings_)
+            recordings = pendingRecordings_;
         if(!haveSession && hasPendingSession_) // restored, machine still loading
         {
             session     = pendingSession_;
@@ -564,7 +755,67 @@ void ChompiProcessor::getStateInformation(juce::MemoryBlock& destData)
         xml.setAttribute("editorWidth", size.x);
         xml.setAttribute("editorHeight", size.y);
     }
+
+    // Each recording's FLAC follows the XML, in <Recordings> order, ending the
+    // state: readers before this format see only the XML.
+    const std::lock_guard<std::mutex> lock(encodedMutex_);
+    for(auto it = encoded_.begin(); it != encoded_.end();)
+        it = recordings.count(it->first) != 0 ? std::next(it) : encoded_.erase(it);
+    std::vector<const juce::MemoryBlock*> flacs;
+    if(!recordings.empty())
+    {
+        auto*       element = xml.createNewChildElement("Recordings");
+        juce::int64 total   = 0;
+        for(const auto& [name, samples] : recordings)
+        {
+            auto&      encoded = encoded_[name];
+            const auto hash    = hashOf(samples);
+            if(encoded.flac.isEmpty() || encoded.size != samples.size() || encoded.hash != hash)
+                encoded = {samples.size(), hash, recording_codec::encode(samples)};
+            if(encoded.flac.isEmpty())
+                continue;
+            auto* child = element->createNewChildElement("Recording");
+            child->setAttribute("name", juce::String(name));
+            child->setAttribute("bytes", juce::String(juce::int64(encoded.flac.getSize())));
+            total += juce::int64(encoded.flac.getSize());
+            flacs.push_back(&encoded.flac);
+        }
+        element->setAttribute("bytes", juce::String(total));
+    }
     copyXmlToBinary(xml, destData);
+    for(const auto* flac : flacs)
+        destData.append(flac->getData(), flac->getSize());
+}
+
+emu::Recordings ChompiProcessor::readRecordings(const juce::XmlElement& xml, const void* data, int sizeInBytes)
+{
+    emu::Recordings recordings;
+    const auto*     element = xml.getChildByName("Recordings");
+    if(element == nullptr)
+        return recordings;
+    const auto total = element->getStringAttribute("bytes").getLargeIntValue();
+    if(total <= 0 || total > sizeInBytes)
+        return recordings;
+
+    const auto*                       next = static_cast<const char*>(data) + (sizeInBytes - total);
+    const auto*                       end  = static_cast<const char*>(data) + sizeInBytes;
+    const std::lock_guard<std::mutex> lock(encodedMutex_);
+    encoded_.clear();
+    for(const auto* child : element->getChildWithTagNameIterator("Recording"))
+    {
+        const auto name  = child->getStringAttribute("name").toStdString();
+        const auto bytes = child->getStringAttribute("bytes").getLargeIntValue();
+        if(bytes <= 0 || bytes > end - next)
+            break;
+        std::vector<int16_t> samples;
+        if(recording_codec::decode(next, size_t(bytes), samples))
+        {
+            encoded_[name]    = {samples.size(), hashOf(samples), juce::MemoryBlock(next, size_t(bytes))};
+            recordings[name] = std::move(samples);
+        }
+        next += bytes;
+    }
+    return recordings;
 }
 
 void ChompiProcessor::setStateInformation(const void* data, int sizeInBytes)
@@ -599,22 +850,32 @@ void ChompiProcessor::setStateInformation(const void* data, int sizeInBytes)
     if(switching || (folder != juce::File() && folder != getCardFolder()))
         startMachine(folder != juce::File() ? folder : defaultCardFolder(firmware), false); // before the session, which goes to the new machine
 
+    std::optional<emu::Session> session;
     if(const auto* element = xml->getChildByName("Session"))
     {
-        emu::Session session;
+        session.emplace();
         for(int i = 0; i < element->getNumAttributes(); i++)
-            session[element->getAttributeName(i).toStdString()] = element->getAttributeValue(i).toStdString();
-        const std::lock_guard<std::mutex> lock(stateMutex_);
-        if(live_ != nullptr)
+            (*session)[element->getAttributeName(i).toStdString()] = element->getAttributeValue(i).toStdString();
+    }
+    auto recordings = readRecordings(*xml, data, sizeInBytes);
+
+    const std::lock_guard<std::mutex> lock(stateMutex_);
+    if(live_ != nullptr)
+    {
+        const juce::SpinLock::ScopedLockType audio(machineLock_);
+        if(session)
+            live_->RestoreSession(*session);
+        live_->RestoreRecordings(std::move(recordings));
+    }
+    else
+    {
+        if(session)
         {
-            const juce::SpinLock::ScopedLockType audio(machineLock_);
-            live_->RestoreSession(session);
-        }
-        else
-        {
-            pendingSession_    = session;
+            pendingSession_    = std::move(*session);
             hasPendingSession_ = true;
         }
+        pendingRecordings_    = std::move(recordings);
+        hasPendingRecordings_ = true;
     }
 }
 

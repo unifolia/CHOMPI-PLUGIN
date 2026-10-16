@@ -55,6 +55,8 @@ class VirtualCard
      *  there is no such folder. */
     bool List(const char* path, std::vector<DirEntry>& out);
     bool IsDir(const char* path);
+    /** A folder in the root (created on disk now); true if it exists after. */
+    bool MakeDir(const char* path);
 
   private:
     explicit VirtualCard(std::filesystem::path folder);

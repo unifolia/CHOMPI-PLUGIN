@@ -1,7 +1,8 @@
-// Port of TAPE 2.0's chompi_main.cpp. Its globals become Firmware members and
-// its interrupt handlers become methods the scheduler in Process() calls; the
-// logic is otherwise line for line. Divergences are marked EMULATOR.
+// Port of TAPE 2.0's chompi_main.cpp: globals become Firmware members,
+// interrupt handlers methods that Process() schedules.
 #include "chompi/Machine.h"
+
+#include <algorithm>
 
 #include "emu_context.h"
 #include "emu_expose.h"
@@ -112,6 +113,7 @@ EMU_EXPOSE(MenuFinalComp, chompi::MenuPage, float, final_comp);
 EMU_EXPOSE(EngineBank, daisy::Engine, Banks, bank);
 EMU_EXPOSE(EngineVoiceBank, daisy::Engine, size_t, voice_bank_);
 EMU_EXPOSE(EngineVoiceSlot, daisy::Engine, size_t, voice_slot_);
+EMU_EXPOSE(EngineLooper, daisy::Engine, daisy::LooperEngine, looper);
 #undef EMU_EXPOSE
 
 class TapeMachine final : public Machine
@@ -123,6 +125,12 @@ class TapeMachine final : public Machine
     void Process(const float* const* in, float* const* out) override;
     bool CaptureSession(Session& out) override;
     void RestoreSession(const Session& session) override;
+    void RecordingSizes(std::map<std::string, size_t>& out) override;
+    void CaptureRecordings(Recordings& out) override;
+    void RestoreRecordings(Recordings recordings) override;
+    bool PlanImport(int button, ImportTarget& out) override;
+    void CompleteImports(std::vector<ImportTarget> imports) override;
+    bool IsReady() override;
 
   private:
     struct Firmware;
@@ -134,12 +142,20 @@ class TapeMachine final : public Machine
     void CheckSDCardMounted();
     void DrainPanelEvents();
     void ApplySession();
+    void ApplyRecordings();
+    void ApplyImports();
 
     std::unique_ptr<Firmware> fw_;
     uint64_t                  blocks_ = 0;
 
     SessionState session_;
     bool         session_pending_ = false;
+
+    std::vector<int16_t> default_buffer_; // the CHIMPO buffer at power-on: FillDefaultSample()'s tone
+    Recordings           recordings_;
+    bool                 recordings_pending_ = false;
+
+    std::vector<ImportTarget> imports_; // pending until the first block after boot
 };
 
 /** Everything chompi_main.cpp keeps in globals. Allocated value-initialised,
@@ -192,6 +208,7 @@ TapeMachine::TapeMachine(std::shared_ptr<VirtualCard> card)
 
     ScopedContext scope(*ctx_);
     Boot();
+    default_buffer_.assign(fw_->chompi_mem.get(), fw_->chompi_mem.get() + fw_->chompi_buff.length);
 }
 
 TapeMachine::~TapeMachine() = default;
@@ -611,14 +628,166 @@ void TapeMachine::ApplySession()
     engine.SetFxPreLooper(s.fxPreLooper);
 }
 
+void TapeMachine::RecordingSizes(std::map<std::string, size_t>& out)
+{
+    out.clear();
+    if(recordings_pending_)
+    {
+        for(const auto& [name, samples] : recordings_)
+            out[name] = samples.size();
+        return;
+    }
+    auto&       f      = *fw_;
+    const auto& chompi = f.chompi_buff;
+    if(chompi.length != default_buffer_.size() || !std::equal(default_buffer_.begin(), default_buffer_.end(), chompi.mem))
+        out["buffer"] = chompi.length;
+    if(!f.engine.GetLooperIsEmpty() && f.loop_buff.length > 0)
+        out["looper"] = f.loop_buff.length;
+}
+
+void TapeMachine::CaptureRecordings(Recordings& out)
+{
+    std::map<std::string, size_t> sizes;
+    RecordingSizes(sizes);
+    for(auto it = out.begin(); it != out.end();)
+        it = sizes.count(it->first) != 0 ? std::next(it) : out.erase(it);
+    for(const auto& [name, size] : sizes)
+    {
+        const int16_t* samples = recordings_pending_ ? recordings_.at(name).data()
+                                 : name == "buffer"  ? fw_->chompi_mem.get()
+                                                     : fw_->loop_mem.get();
+        out[name].assign(samples, samples + size);
+    }
+}
+
+void TapeMachine::RestoreRecordings(Recordings recordings)
+{
+    recordings_         = std::move(recordings);
+    recordings_pending_ = true;
+}
+
+/** As the firmware loads a buffer from a slot (MenuPage: StopAllVoices(), the
+ *  copy, then LooperOpenFile() for the looper, which comes back paused at its
+ *  start). No looper clears it as holding play + loop does. */
+void TapeMachine::ApplyRecordings()
+{
+    auto& f      = *fw_;
+    auto& engine = f.engine;
+    auto& enc    = f.ui.*Get(UiEncValues{});
+    auto  put    = [](daisy::RamBufferMemory& ram, const std::vector<int16_t>& samples) {
+        const size_t n = std::min(samples.size(), daisy::kMaxRamBuffSize) & ~size_t(1);
+        std::copy(samples.begin(), samples.begin() + long(n), ram.mem);
+        ram.length = n;
+    };
+    const auto buffer = recordings_.find("buffer");
+    const auto looper = recordings_.find("looper");
+
+    engine.StopAllVoices();
+    if(engine.Recording())
+        engine.StopRecording();
+    put(f.chompi_buff, buffer != recordings_.end() ? buffer->second : default_buffer_);
+
+    if(looper != recordings_.end() && looper->second.size() >= 2)
+    {
+        put(f.loop_buff, looper->second);
+        engine.LooperOpenFile();
+        enc[0][4] = chompi::enc_defaults[0][4];
+        engine.ResetLooperPitchQuant();
+    }
+    else if(!engine.GetLooperIsEmpty())
+    {
+        (engine.*Get(EngineLooper{})).Reset();
+        engine.looper_reset = true; // NormalPage::Draw resets the looper knob
+    }
+
+    recordings_.clear();
+    recordings_pending_ = false;
+}
+
+bool TapeMachine::PlanImport(int button, ImportTarget& out)
+{
+    const auto* white = std::find(std::begin(panel::kWhiteKeys), std::end(panel::kWhiteKeys), button);
+    const int   key   = white != std::end(panel::kWhiteKeys) ? int(white - std::begin(panel::kWhiteKeys)) + 1 : 0;
+    out               = {};
+    out.maxSeconds    = double(daisy::kMaxRamBuffSize / 2) / kSampleRate; // the CHIMPO buffer's 165 s, for slots too
+    if(button == panel::kPlayKey || button == panel::kLoopKey)
+    {
+        out.recording = "looper";
+        out.label     = "the looper";
+        return true;
+    }
+    if(key == 15)
+    {
+        out.recording = "buffer";
+        out.label     = "the CHIMPO buffer";
+        return true;
+    }
+    if(key < 1)
+        return false;
+
+    auto&      engine = fw_->engine;
+    const auto mode   = engine.GetVoiceMode();
+    const int  bank   = (engine.*Get(EngineBank{}))[int(mode)];
+    char       name[32];
+    daisy::Engine::GetFileNameForSlot(key, bank, mode, name, false);
+    out.file = name;
+    daisy::Engine::GetFileNameForSlot(key, bank, mode, name, true);
+    out.obsolete = {name}; // rebuilt at boot (FileCopier::NeedsOverwrite)
+    out.label    = std::string(mode == daisy::VoiceMode::JAMMI ? "Jammi " : "Cubbi ") + char('a' + bank) + std::to_string(key);
+    out.mode     = int(mode);
+    out.bank     = bank;
+    out.slot     = key;
+    return true;
+}
+
+void TapeMachine::CompleteImports(std::vector<ImportTarget> imports)
+{
+    imports_ = std::move(imports);
+}
+
+/** A slot gets default settings, as erasing one does; the first is selected
+ *  if Jammi shows. New CHIMPO buffer audio ends as a recording does. */
+void TapeMachine::ApplyImports()
+{
+    auto& f = *fw_;
+    for(size_t i = 0; i < imports_.size(); i++)
+    {
+        const auto& t = imports_[i];
+        if(t.recording == "buffer")
+            f.ui.normal_page_.StopVoiceRecording();
+        else if(!t.file.empty())
+        {
+            f.presets.Invalidate(uint8_t(t.mode), uint8_t(t.bank), uint8_t(t.slot));
+            if(i == 0 && t.mode == int(daisy::VoiceMode::JAMMI))
+            {
+                f.engine.SetBank(size_t(t.bank));
+                f.ui.menu_page_.SetVoiceSlot(size_t(t.slot));
+            }
+        }
+    }
+    imports_.clear();
+}
+
+bool TapeMachine::IsReady()
+{
+    return fw_->rainbow_done && !fw_->ui.InRainbows();
+}
+
 void TapeMachine::Process(const float* const* in, float* const* out)
 {
     ScopedContext scope(*ctx_);
 
-    if(session_pending_ && fw_->rainbow_done)
+    if(fw_->rainbow_done)
     {
-        session_pending_ = false;
-        ApplySession();
+        if(recordings_pending_)
+            ApplyRecordings();
+        if(session_pending_)
+        {
+            session_pending_ = false;
+            ApplySession();
+        }
+        if(!imports_.empty())
+            ApplyImports();
     }
 
     DrainPanelEvents();

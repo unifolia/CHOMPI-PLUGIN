@@ -618,6 +618,14 @@ void Key::setBacklight(Colour c)
     repaint();
 }
 
+void Key::setDropTarget(bool target)
+{
+    if(target == dropTarget_)
+        return;
+    dropTarget_ = target;
+    repaint();
+}
+
 Rectangle<float> Key::capBounds() const
 {
     const float size = style_ == Style::White ? Layout::kWhiteKeySize
@@ -756,6 +764,11 @@ void Key::paint(Graphics& g)
     {
         g.setColour(kGold);
         g.drawRoundedRectangle(cap.expanded(3.f), 10.f, 2.f);
+    }
+    if(dropTarget_)
+    {
+        g.setColour(Colours::white.withAlpha(0.9f));
+        g.drawRoundedRectangle(cap.expanded(6.f), 12.f, 2.5f);
     }
 }
 

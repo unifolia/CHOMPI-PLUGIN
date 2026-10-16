@@ -8,8 +8,12 @@
 // Commands (';'-separated): wait <ms> | press <id> | release <id> |
 // turn <encoder> <detents> | toggle <1|0> | shot <file.png> [scale] |
 // render <file.wav> <host rate> <block> <seconds> <midi note> [off|cc123|none]
-//   (note on at 0.1 s, released at 60% of the length by note-off, All Notes
-//   Off, or not at all; line out only) |
+//   (note on at 0.1 s unless the note is -1, released at 60% of the length by
+//   note-off, All Notes Off, or not at all; line out only) |
+// input <hz> <gain>   sine on the line input during renders (0 0: off) |
+// codectest <file.wav> <seconds>   recording FLAC round trip on that audio, tiled |
+// import <button> <file>...   as if dropped on that key (Panel.h ID) |
+// drag <x> <y> <file>... | drop <x> <y> <file>... | dragexit   the editor's file drag, at canvas coordinates |
 // save <file> | load <file>   plugin state | reopen   new plugin instance |
 // reload   power-cycle on the project's card folder (menu: Reload SD Card) |
 // firmware <tape|wave|tempo>   switch firmware (on its default card) |
@@ -21,7 +25,9 @@
 
 #include <sstream>
 
+#include "../plugin/PluginEditor.h"
 #include "../plugin/PluginProcessor.h"
+#include "../plugin/RecordingCodec.h"
 
 namespace
 {
@@ -65,6 +71,7 @@ int main(int argc, char** argv)
 
     HostPlayHead host;
     bool         hasHost = false;
+    double       inputHz = 0, inputGain = 0, inputPhase = 0;
 
     std::stringstream script(argv[1]);
     std::string       command;
@@ -117,7 +124,9 @@ int main(int argc, char** argv)
             std::string file;
             in >> file;
             juce::MemoryBlock state;
+            const auto        t0 = juce::Time::getMillisecondCounterHiRes();
             processor->getStateInformation(state);
+            std::printf("saved %zu bytes in %.1f ms\n", state.getSize(), juce::Time::getMillisecondCounterHiRes() - t0);
             juce::File(file).replaceWithData(state.getData(), state.getSize());
         }
         else if(op == "load")
@@ -126,7 +135,9 @@ int main(int argc, char** argv)
             juce::MemoryBlock state;
             in >> file;
             juce::File(file).loadFileAsData(state);
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
             processor->setStateInformation(state.getData(), int(state.getSize()));
+            std::printf("loaded in %.1f ms\n", juce::Time::getMillisecondCounterHiRes() - t0);
         }
         else if(op == "reload")
             processor->insertCard({});
@@ -144,11 +155,66 @@ int main(int argc, char** argv)
             host.ppq     = 0;
             hasHost      = true;
         }
+        else if(op == "input")
+            in >> inputHz >> inputGain;
         else if(op == "hostsync")
         {
             int on;
             in >> on;
             processor->setHostSync(on != 0);
+        }
+        else if(op == "import")
+        {
+            int               button;
+            juce::StringArray files;
+            std::string       file;
+            in >> button;
+            while(in >> file)
+                files.add(file);
+            const auto t0      = juce::Time::getMillisecondCounterHiRes();
+            const auto message = processor->importAudio(files, button);
+            std::printf("import: %s (%.0f ms)\n", message.toRawUTF8(), juce::Time::getMillisecondCounterHiRes() - t0);
+        }
+        else if(op == "drag" || op == "drop")
+        {
+            int               x, y;
+            juce::StringArray files;
+            std::string       file;
+            in >> x >> y;
+            while(in >> file)
+                files.add(file);
+            auto& target = dynamic_cast<juce::FileDragAndDropTarget&>(*editor);
+            if(op == "drag")
+                std::printf("interested: %d\n", int(target.isInterestedInFileDrag(files)));
+            if(op == "drag")
+                target.fileDragMove(files, x, y);
+            else
+                target.filesDropped(files, x, y);
+        }
+        else if(op == "dragexit")
+            dynamic_cast<juce::FileDragAndDropTarget&>(*editor).fileDragExit({});
+        else if(op == "codectest")
+        {
+            std::string file;
+            double      seconds;
+            in >> file >> seconds;
+            juce::WavAudioFormat                     wav;
+            std::unique_ptr<juce::AudioFormatReader> reader(wav.createReaderFor(new juce::FileInputStream(juce::File(file)), true));
+            juce::AudioBuffer<float>                 source(2, int(reader->lengthInSamples));
+            reader->read(&source, 0, source.getNumSamples(), 0, true, true);
+            std::vector<int16_t> samples(size_t(seconds * 48000) * 2);
+            for(size_t i = 0; i < samples.size() / 2; i++)
+                for(int ch = 0; ch < 2; ch++)
+                    samples[2 * i + size_t(ch)] = int16_t(std::lround(32767.f * source.getSample(ch, int(i % size_t(source.getNumSamples())))));
+            const auto           t0   = juce::Time::getMillisecondCounterHiRes();
+            const auto           flac = recording_codec::encode(samples);
+            const auto           t1   = juce::Time::getMillisecondCounterHiRes();
+            std::vector<int16_t> back;
+            const bool           ok = recording_codec::decode(flac.getData(), flac.getSize(), back);
+            const auto           t2 = juce::Time::getMillisecondCounterHiRes();
+            std::printf("flac: %.1f%% of raw, encode %.0f ms, decode %.0f ms, lossless %s\n",
+                        100.0 * double(flac.getSize()) / double(samples.size() * 2), t1 - t0, t2 - t1,
+                        ok && back == samples ? "yes" : "NO");
         }
         else if(op == "reopen")
         {
@@ -178,10 +244,13 @@ int main(int argc, char** argv)
                 const int n = std::min(block, total - pos);
                 io.setSize(2, n, false, false, true);
                 io.clear();
+                for(int i = 0; i < n && inputHz > 0; i++, inputPhase += 2 * M_PI * inputHz / rate)
+                    for(int ch = 0; ch < 2; ch++)
+                        io.setSample(ch, i, float(inputGain * std::sin(inputPhase)));
                 midi.clear();
-                if(on >= pos && on < pos + n)
+                if(note >= 0 && on >= pos && on < pos + n)
                     midi.addEvent(juce::MidiMessage::noteOn(1, note, uint8_t(127)), on - pos);
-                if(off >= pos && off < pos + n && release != "none")
+                if(note >= 0 && off >= pos && off < pos + n && release != "none")
                     midi.addEvent(release == "cc123" ? juce::MidiMessage::allNotesOff(1) : juce::MidiMessage::noteOff(1, note), off - pos);
                 processor->processBlock(io, midi);
                 for(int ch = 0; ch < 2; ch++)

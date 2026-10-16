@@ -1,4 +1,3 @@
-// The CHOMPI panel: static artwork, LEDs, keys, encoders and the mode toggle.
 // Geometry is in a fixed 1100 x 470 canvas (measured from a top-down product
 // photo); the editor scales the whole canvas.
 #pragma once
@@ -91,6 +90,7 @@ class Key : public juce::Component, public juce::SettableTooltipClient
 
     Key(Input& input, int button, Style style, int smtLed);
     void setBacklight(juce::Colour c);
+    void setDropTarget(bool target);
     int  smtLed() const { return smtLed_; }
     int  button() const { return button_; }
 
@@ -109,6 +109,7 @@ class Key : public juce::Component, public juce::SettableTooltipClient
     Style        style_;
     int          smtLed_;
     juce::Colour backlight_{juce::Colours::black};
+    bool         dropTarget_ = false;
 };
 
 class Knob : public juce::Component, public juce::SettableTooltipClient
@@ -153,7 +154,6 @@ class Toggle : public juce::Component, public juce::SettableTooltipClient
     Input& input_;
 };
 
-/** Layout of every control, in canvas coordinates. */
 struct Layout
 {
     static juce::Point<float> whiteKey(int i) { return {92.f + 65.29f * float(i), 382.f}; }

@@ -1,6 +1,5 @@
-// Port of WAVE 1.0's chompi_main.cpp. Its globals become Firmware members and
-// its interrupt handlers become methods the scheduler in Process() calls; the
-// logic is otherwise line for line. Divergences are marked EMULATOR.
+// Port of WAVE 1.0's chompi_main.cpp: globals become Firmware members,
+// interrupt handlers methods that Process() schedules.
 #include "chompi/Machine.h"
 
 #include "emu_context.h"
@@ -142,6 +141,7 @@ class WaveMachine final : public Machine
     void Process(const float* const* in, float* const* out) override;
     bool CaptureSession(Session& out) override;
     void RestoreSession(const Session& session) override;
+    bool IsReady() override;
 
   private:
     struct Firmware;
@@ -642,6 +642,11 @@ void WaveMachine::ApplySession()
         steps[i] = i < s.steps.size() ? s.steps[i] : KeyRequest();
     f.seq.*Get(SeqLength{}) = uint8_t(std::min<size_t>(s.steps.size(), Sequencer::kMaxSeqLen));
     f.seq.setGate(fclamp(s.gate, 0.f, 1.f));
+}
+
+bool WaveMachine::IsReady()
+{
+    return fw_->rainbow_done && !fw_->loading_screen && !fw_->ui.InRainbows();
 }
 
 void WaveMachine::Process(const float* const* in, float* const* out)
