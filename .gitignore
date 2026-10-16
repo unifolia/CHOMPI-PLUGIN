@@ -7,3 +7,8 @@ Icon?
 # Editor state
 .cortex-debug.*.state.json
 .vs/
+CLAUDE.MD
+
+# Build output
+/build*/
+
