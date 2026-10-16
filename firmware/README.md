@@ -1,109 +1,63 @@
+# The firmwares (emulated)
 
+`tape/src`, `wave/src` and `tempo/src` are CHOMPI's TAPE 2.0 sampler, WAVE 1.0
+wavetable synth and TEMPO 1.0 pattern generator as released in commit
+`a73d732` (`firmware/chompi-<name>/code/src`), minus the files that only drive
+the Daisy Seed, and with the changes listed below. Replacements for the
+removed files are in `emulator/`.
 
-# CHOMPI Firmware: Build Quickstart (macOS)
+| Removed | Replaced by |
+|---|---|
+| `hardware.h`, `encoder.h`, `encoder.cpp` | `emulator/shim/emu_hardware.h` and `emulator/shim/<name>/hardware.h` (each firmware's MIDI interface) |
+| `temp_led_stuff.h` (LED PWM/DMA driver) | `emulator/shim/temp_led_stuff.h` |
+| `chompi_main.cpp` | `emulator/src/<name>/<Name>Machine.cpp` (line-for-line port as a class) |
+| `chompi_sram.lds`, `Makefile`, `.vscode/` | the CMake build |
 
-This takes you from source code to a firmware build flashed onto your CHOMPI. The firmware runs on a Daisy Seed (STM32H750) and uses the libDaisy / DaisySP libraries, which are already included in `code/libs/`.
+WAVE and TEMPO also drive libDaisy's MIDI UART/USB handlers, a hardware timer
+(their clock) and Cortex-M cache and interrupt calls directly; those are
+`emulator/shim/emu_peripherals.h`. The bootloader, battery-management test and
+ARM toolchain notes were dropped; they are in the git history.
 
-## 1. Get what you need
+## Changes to shipped code
 
-### Software
+- `tape/src/Warble.h`: `SetDelay(10u)` → `SetDelay(size_t(10))`. On the 32-bit
+  Daisy `size_t` is `unsigned int`, so this is the overload the hardware calls;
+  with a 64-bit `size_t` the original is ambiguous.
+- `tempo/src/SampleManager.h`, `tempo/src/SliceEngine.h`: arithmetic on
+  `void*` (a GCC extension, rejected by clang in C++) is done on `char*`, which
+  is what GCC does. Six expressions; no change in behaviour.
 
-You need three tools:
+WAVE compiles unchanged. TEMPO's own release notes ask for GCC 13.3 on ARM;
+here it builds with the host's clang as C++17.
 
-| Tool | What it does |
-|------|--------------|
-| `arm-none-eabi-gcc` **10.3-2021.10** (**13.3.rel1** for TEMPO) | Compiles code for the Daisy's ARM chip |
-| `make` | Runs the build (comes with the Xcode command line tools) |
-| `dfu-util` (optional) | Flashes the bootloader to CHOMPI (not your code) |
+## Vendored libraries
 
-**Important:** libDaisy only supports the older ARM GCC **10.3-2021.10**, the Daisy toolchain default. Newer versions are not officially supported by Electrosmith, and testing has shown that compiling with newer versions can create issues with the SD card communication. Use 10.3.1 for **TAPE** and **WAVE** or your own custom firmwares.
+`libs/` keeps only what the firmwares use, and is shared: these files are
+byte-identical in the TAPE, WAVE and TEMPO releases (whose libDaisy and
+DaisySP otherwise differ). libDaisy's UI framework, FIFO, WAV header, MIDI
+event types and MIDI parser (the CHOMPI adaptation of v5.4.0); DaisySP's
+`Source/` (each firmware compiles the modules it uses, `CMakeLists.txt`); coreJSON v3.2.0's source. Each firmware
+still compiles its own copy. `UNIT_TEST` is defined to select libDaisy's
+host-side `ScopedIrqBlocker`. libDaisy's `sys/system.h` is replaced by an
+emulator stand-in (virtual clock), `emulator/shim/sys/system.h`.
 
-**The exception is TEMPO**, which must be built with the Arm GNU Toolchain **13.3.rel1** (GCC 13.3.1). You can install it alongside 10.3 and switch between them using the PATH setting below.
+## Portability notes
 
-The easiest install is the official Daisy toolchain script (macOS):
-https://github.com/electro-smith/DaisyToolchain (see `macOS/install.command`).
-It installs the compiler via Homebrew, and also `openocd` and `dfu-util`.
+The firmwares assume 32-bit ARM. Known differences on a 64-bit host:
 
-If you already have other GCC versions installed, that's fine: just put version 10.3's `bin` folder first on your PATH. For example, if it is installed at `/Applications/ArmGNUToolchain/10.3-2021.10`:
-
-```bash
-export PATH="/Applications/ArmGNUToolchain/10.3-2021.10/bin:$PATH"
-```
-
-Add that line to `~/.zshrc` to make it permanent. Check it worked:
-
-```bash
-arm-none-eabi-gcc --version    # should say 10.3.1
-```
-
-To build TEMPO, point your PATH at the 13.3.rel1 `bin` folder instead (in that terminal window only, or edit your `~/.zshrc` line). For example, if it is installed at `/Applications/ArmGNUToolchain/13.3.rel1`:
-
-```bash
-export PATH="/Applications/ArmGNUToolchain/13.3.rel1/arm-none-eabi/bin:$PATH"
-arm-none-eabi-gcc --version    # should say 13.3.1
-```
-
-### Hardware (recommended for writing firmware)
-
-If you plan on writing or editing firmware, it is highly recommended to get an additional Daisy Seed with a [debug header](https://www.digikey.com/en/products/detail/amphenol-cs-fci/20021111-00010T4LF/2209072) and an [STLINK-V3MINIE debugger](https://www.digikey.com/en/products/detail/stmicroelectronics/STLINK-V3MINIE/16284301).
-
-The debug header must be soldered to the Daisy Seed, and the back panel of the enclosure will not fit with the header installed. That is why two Daisy Seeds are recommended: one with the header for development, and one without for the enclosure.
-
-If you only plan to load existing or community-made firmware onto your CHOMPI and do not require debugging features, you may not need these. Any firmware can be swapped out manually via the SD card, so even though it'll probably be a bit more clunky, it should technically work just fine.
-
-## 2. Navigate to the correct directory
-
-All source code lives in `code/src/`, and this is the folder you run `make` from. Using Terminal, navigate to the `code/src` folder of the firmware that you want to build. 
-
-## 3. Build
-
-Run the command:
-```bash
-make
-```
-
-When this finishes you will see a memory usage table, and the output files appear in `code/src/build/`:
-
-- `CHOMPI.bin`: the firmware you flash to the board
-- `CHOMPI.elf`: same firmware plus debug info (used with gdb)
-
-Handy variants:
-
-```bash
-make clean      # delete build/ and start fresh
-make -j4        # build faster using 4 CPU cores
-```
-
-Some yellow or purple "warning" lines (like unused variables) are normal. Only lines that say `error` mean the build failed.
-
-If you ever need to rebuild the libraries themselves (rare) you will need to navigate to the `code/libs/libDaisy` or `code/libs/DaisySP` folder and run `make` there.
-
-## 4. Flash it to the board
-
-CHOMPI runs as a "BOOT_SRAM" app, meaning it is loaded by the Daisy bootloader from the board's QSPI flash.
-
-All you need to do for this kind of app is to take the CHOMPI.bin from the `/build` folder and put it on the SD card, deleting any other .bin file there first. When you power on your CHOMPI, it will reprogram QSPI flash with your new app which is indicated by the slow rainbow LED pattern.
-
-**First time only:** if the board has never had the bootloader installed, navigate to the `bin/` folder in Terminal and run `./install_bootloader.sh`, then flash the app as above. Make sure you put the Daisy Seed in DFU mode first by holding the BOOT button and tapping RESET.
-
-## 5. Use the SD card
-
-The firmware loads sound files (`.wav` files) from the SD card, and also stores `options.json` and `presets.json` there. Put your wavetable or sample files in the top-level folder of a FAT-formatted card.
-
-## 6. Debugging
-
-**This requires an STLINK-V3MINIE debugger.**
-
-To find out what is happening in your program, you can use the debugging tools. Open a new terminal window and run `openocd -f interface/stlink.cfg -f target/stm32h7x.cfg`
-In another window, navigate into the `/build` folder and run `arm-none-eabi-gdb CHOMPI.elf`. In this same window, run `target remote localhost:3333` and you will be connected.
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `arm-none-eabi-gcc: command not found` | The toolchain isn't on your PATH (see step 1) |
-| `make` says "Nothing to be done" but you changed a file | Run `make clean && make` |
-|Debugger indicates SD card is stuck|Try switching compiler versions|
-|CHOMPI is not responding to input | Use the debugger to find where in the code it got stuck |
-
-If you ever get stuck to the point where CHOMPI is not responding and all else fails, you can erase and reflash the bootloader. https://flash.daisy.audio contains a web tool to do this.
+- TAPE's `SampleReader` computes `val * (f_size - sizeof(WAV header))` in
+  `size_t`. With no file open this wraps at 2^64 instead of 2^32 before the
+  float to `uint32_t` conversion. Both saturate to the same value for the 0 and
+  1 the firmware passes at init; other values with no file open can differ.
+- `OptionsManager` passes `size_t` to `%d`; arm64 and x86-64 read the low 32
+  bits, so the queries are the same.
+- TAPE's `Warble` random seed is a function `static`, shared (unsynchronised)
+  by every TAPE unit in a process. It only shapes the lo-fi wobble.
+- TEMPO's `ArpeggiatorSequencer` reads `notes[i][curIdx[i]]` in places
+  without checking for an empty vector (`checkNotePlaying` then discards it).
+  On the STM32 that reads near address 0, which is mapped; on a Mac it faults. The port reserves the
+  vectors' storage at boot so the read stays in owned memory
+  (`emulator/src/tempo/TempoMachine.cpp`).
+- TEMPO's clock manager subtracts `System::GetTick()` values in `size_t`,
+  which wraps correctly only where `size_t` is 32 bits; the emulator's tick is
+  64-bit.
