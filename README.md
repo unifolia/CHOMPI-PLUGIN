@@ -1,11 +1,10 @@
 # CHIMPO
 
-CHIMPO is an open-source plugin that emulates **CHOMPI**. The firmware code
-is as released, except for a few 64-bit portability fixes (`firmware/README.md`).
+CHIMPO is an open-source **CHOMPI** fork and emulation plugin. The firmware code
+is as released, except for a few 64-bit portability fixes (`firmware/README.md`). Many thanks to the CHOMPI team for releasing the firmware - all credit goes to them, truly.
 
 CHIMPO is an independent project, not affiliated with or endorsed by CHOMPI
-Club or Chase Bliss. I mean, the names are so different. CHOMPI is a trademark of CHOMPI Club (see
-[License](#license)).
+Club or Chase Bliss. I mean, the names are so different. CHOMPI is a trademark of CHOMPI Club (see [License](#license)).
 
 ## Build
 
@@ -19,8 +18,8 @@ The script asks which formats to build and whether to include
 Intel, checks for Apple's Command Line Tools and CMake 3.22+ (offering to
 install them), builds, and installs for the current user:
 
-AU, VST3 | `~/Library/Audio/Plug-Ins/`
-Factory cards | `~/Library/Application Support/CHIMPO/Factory Cards/<TAPE, WAVE, TEMPO>`
+AU, VST3: `~/Library/Audio/Plug-Ins/`
+Factory cards: `~/Library/Application Support/CHIMPO/Factory Cards/<TAPE, WAVE TEMPO>`
 
 `./build.sh au vst3 [--universal]` skips the questions. The first build
 downloads JUCE 9.0.4 and takes a few minutes; afterwards the source folder is
@@ -41,7 +40,7 @@ picks formats). Builds are native-arch; add
 
 I am working on getting this on Windows/Linux as well.
 
-## Layout
+## Map
 
 | | |
 |---|---|
@@ -56,6 +55,8 @@ I am working on getting this on Windows/Linux as well.
 
 The original release also contained the hardware design files, the bootloader
 and the firmware binaries.
+
+Thanks, and go make some magic.
 
 ## License
 
