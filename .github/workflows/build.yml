@@ -30,7 +30,7 @@ jobs:
           - name: Windows-x64
             os: windows-2025
             # clang-cl: the firmware uses GCC attributes MSVC's compiler rejects.
-            configure: -G "Visual Studio 17 2022" -A x64 -T ClangCL
+            configure: -A x64 -T ClangCL # no -G: CMake picks the newest Visual Studio, so image bumps keep working
           - name: Linux-x64
             # The oldest glibc the package then needs: 2.35.
             os: ubuntu-22.04

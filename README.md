@@ -36,11 +36,12 @@ no longer needed, but keep it to update (`git pull`, then `./build.sh`).
 
 ### Windows and Linux
 
-CMake 3.22+ builds the VST3. On Windows, with Visual Studio 2022 and its
-"C++ Clang tools for Windows" component (the firmware needs clang):
+CMake 3.22+ builds the VST3. On Windows, with Visual Studio 2022+ and its
+"C++ Clang tools for Windows" component (the firmware needs clang; VS 2026
+needs CMake 4.2+):
 
 ```bash
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+cmake -S . -B build -A x64 -T ClangCL
 cmake --build build --config Release
 ```
 
