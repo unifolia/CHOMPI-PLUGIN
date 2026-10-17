@@ -14,7 +14,7 @@
 #include "MicFilter.h"
 #include "reverb.h"
 #include "RamBuffer.h"
-#include "Limiter.h"
+#include "limiter.h"
 #include "InterpolatedDelayLine.h"
 #include <algorithm>
 

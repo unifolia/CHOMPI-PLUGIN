@@ -42,7 +42,7 @@ done
 info "${bold}CHIMPO build${reset}"
 info
 
-[ "$(uname -s)" = Darwin ] || fail "CHIMPO builds on macOS only (AU and VST3). Windows and Linux aren't supported yet."
+[ "$(uname -s)" = Darwin ] || fail "build.sh is for macOS. On Windows and Linux, download a release or build with CMake (README.md)."
 
 # ---- Tools -----------------------------------------------------------------
 
@@ -160,7 +160,15 @@ esac
 case ";$formats;" in *";VST3;"*)
     info "  VST3        ~/Library/Audio/Plug-Ins/VST3/CHIMPO.vst3" ;;
 esac
-info "  Factory     ~/Library/Application Support/CHIMPO/Factory Cards (TAPE, WAVE, TEMPO)"
+info "  The factory SD cards are inside the plugin."
+
+# Earlier builds installed the factory cards here; the plugin no longer reads them.
+old_cards="$HOME/Library/Application Support/CHIMPO/Factory Cards"
+if [ -d "$old_cards" ]; then
+    rm -rf "$old_cards"
+    rmdir "$HOME/Library/Application Support/CHIMPO" 2>/dev/null || true
+    info "  Removed the old copy in ~/Library/Application Support/CHIMPO."
+fi
 info
 info "${bold}Next${reset}"
 info "  Restart your DAW and load CHIMPO as an instrument (some DAWs need a"

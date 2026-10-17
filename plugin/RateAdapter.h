@@ -13,6 +13,7 @@
 // land above the passband. Each way adds half the filter's length to the
 // latency: ~0.7 ms at 44.1 kHz, ~0.4 ms from 88.2 kHz up.
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
