@@ -2,7 +2,12 @@
 // and the factory. Built once, outside the firmware objects.
 #include "chompi/Machine.h"
 
+#include <algorithm>
+#include <cmath>
+#include <iterator>
+
 #include "emu_context.h"
+#include "emu_controls.h"
 
 // Each firmware object exports only its factory, with C linkage so the export
 // list (CMakeLists.txt) needn't spell a mangled name. CHOMPI_HAS_<NAME> says
@@ -55,6 +60,72 @@ Machine::Machine(Firmware firmware, std::shared_ptr<VirtualCard> card)
 : card_(std::move(card)), ctx_(std::make_unique<Context>()), firmware_(firmware)
 {
     ctx_->card = card_.get();
+    const size_t controls = Controls(firmware).size();
+    control_target_.assign(controls, 0.f);
+    control_seen_.assign(controls, NAN); // the first read reports the power-on values
+    control_pending_.assign(controls, 0);
+}
+
+const std::vector<ControlInfo>& Machine::Controls(Firmware firmware)
+{
+    static const std::vector<ControlInfo> tape(std::begin(controls::kTapeInfo), std::end(controls::kTapeInfo));
+    static const std::vector<ControlInfo> wave(std::begin(controls::kWaveInfo), std::end(controls::kWaveInfo));
+    static const std::vector<ControlInfo> tempo(std::begin(controls::kTempoInfo), std::end(controls::kTempoInfo));
+    switch(firmware)
+    {
+        case Firmware::Tape: return tape;
+        case Firmware::Wave: return wave;
+        case Firmware::Tempo: return tempo;
+    }
+    return tape;
+}
+
+void Machine::SetControl(int index, float value)
+{
+    if(index < 0 || size_t(index) >= control_target_.size() || !std::isfinite(value))
+        return;
+    control_target_[size_t(index)] = std::clamp(value, 0.f, 1.f);
+    if(!control_pending_[size_t(index)])
+    {
+        control_pending_[size_t(index)] = 1;
+        controls_pending_++;
+    }
+}
+
+bool Machine::ReadControl(int index, float& value)
+{
+    if(index < 0 || size_t(index) >= control_seen_.size())
+        return false;
+    value = ControlValue(index);
+    if(control_pending_[size_t(index)]) // the host's value is on its way
+        return false;
+    float&     seen    = control_seen_[size_t(index)];
+    const bool changed = !(value == seen); // NaN: never read
+    seen               = value;
+    return changed;
+}
+
+void Machine::ChaseControls()
+{
+    // Bounds the work, and the burst of MIDI CC the firmware sends per click,
+    // in one block: a full sweep of a fine-step knob (333 clicks) takes 21
+    // blocks, 10 ms.
+    constexpr int kMaxClicksPerBlock = 16;
+
+    for(size_t i = 0; i < control_pending_.size() && controls_pending_ > 0; i++)
+    {
+        if(!control_pending_[i])
+            continue;
+        const float before = ControlValue(int(i));
+        const bool  done   = TurnControl(int(i), control_target_[i], kMaxClicksPerBlock);
+        if(const float after = ControlValue(int(i)); done || after != before)
+            control_seen_[i] = after; // not reported: the host asked for it
+        if(done)
+        {
+            control_pending_[i] = 0;
+            controls_pending_--;
+        }
+    }
 }
 
 Machine::~Machine() = default;

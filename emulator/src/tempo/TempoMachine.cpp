@@ -7,6 +7,7 @@
 #include <iterator>
 
 #include "emu_context.h"
+#include "emu_controls.h"
 #include "emu_expose.h"
 #include "emu_session.h"
 
@@ -146,6 +147,43 @@ EMU_EXPOSE(UiEncValues, chompi::UserInterface, EncValues, enc_values);
 EMU_EXPOSE(UiKnobPage, chompi::UserInterface, KnobPages, knob_page);
 EMU_EXPOSE(SaverSlots, StateSaver, Slots, states_);
 EMU_EXPOSE(ClockFreeTempo, clockManager, uint32_t, current_tempo);
+EMU_EXPOSE(NormalTransportHeld, chompi::NormalPage, bool, transport_held);
+EMU_EXPOSE(MenuPan, chompi::MenuPage, float, pan);
+EMU_EXPOSE(MenuRedux, chompi::MenuPage, float, reduce);
+EMU_EXPOSE(MenuLoop, chompi::MenuPage, float, loop);
+EMU_EXPOSE(MenuSustain, chompi::MenuPage, float, sustain);
+EMU_EXPOSE(MenuRandomness, chompi::MenuPage, float, randomness);
+EMU_EXPOSE(MenuFeedback, chompi::MenuPage, float, feedback);
+EMU_EXPOSE(MenuArpRandomness, chompi::MenuPage, float, arp_randomness);
+EMU_EXPOSE(MenuFinalComp, chompi::MenuPage, float, final_comp);
+
+using namespace controls;
+
+// NormalPage/MenuPage: kEncoderFineStep .003, kEncoderCoarseStep .01; tempo
+// reads the clock (ControlValue), a click moving it by one. Each handler
+// applies every page itself.
+constexpr Knob kTempoKnobs[kNumTempo] = {
+    {false, 0, 0, 1, .003f},       // pitch (see TurnControl)
+    {false, 0, 1, 1, 1.f / 33.f},  // sample volume (kEncoderCycleStep)
+    {false, 0, 2, 1, .01f},        // filter
+    {false, 1, 0, 3, .009f, true}, // start: sized by the chromatic window
+    {false, 1, 1, 3, .03f},        // attack
+    {false, 2, 0, 3, .009f, true}, // end: as start
+    {false, 2, 1, 3, .03f},        // release
+    {false, 3, 0, 3, .009f},       // delay
+    {false, 3, 1, 3, .03f},        // delay mix
+    {false, 4, 0, 1, 1.f / 320.f}, // tempo
+    {false, 5, 0, 3, .03f},        // volume
+    {false, 5, 1, 3, .03f},        // input gain
+    {true, 0, 1, 1, .01f},         // pan
+    {true, 0, 2, 1, .01f},         // sample-rate reduction
+    {true, 1, 1, 3, .03f},         // loop
+    {true, 2, 1, 3, .03f},         // sustain
+    {true, 3, 0, 3, .03f},         // delay randomness
+    {true, 3, 1, 3, .03f},         // delay feedback
+    {true, 4, 0, 1, .01f},         // pattern randomness
+    {true, 5, 0, 3, .03f},         // compression (any page)
+};
 
 class TempoMachine final : public Machine
 {
@@ -160,6 +198,10 @@ class TempoMachine final : public Machine
     bool PlanImport(int button, ImportTarget& out) override;
     void CompleteImports(std::vector<ImportTarget> imports) override;
     bool IsReady() override;
+
+  protected:
+    float ControlValue(int index) override;
+    bool  TurnControl(int index, float target, int maxClicks) override;
 
   private:
     struct Firmware;
@@ -778,6 +820,50 @@ void TempoMachine::SetClockSync(bool sync)
     sync_pending_ = sync ? SYNC : FREE;
 }
 
+float TempoMachine::ControlValue(int index)
+{
+    auto& f    = *fw_;
+    auto& menu = f.ui.menu_page_;
+    switch(index)
+    {
+        case kTempoTempo: return float(int(f.cManager.*Get(ClockFreeTempo{})) - 160) / 320.f;
+        case kTempoPan: return menu.*Get(MenuPan{});
+        case kTempoRedux: return menu.*Get(MenuRedux{});
+        case kTempoLoop: return menu.*Get(MenuLoop{});
+        case kTempoSustain: return menu.*Get(MenuSustain{});
+        case kTempoDelayRandom: return menu.*Get(MenuRandomness{});
+        case kTempoFeedback: return menu.*Get(MenuFeedback{});
+        case kTempoPatternRandom: return menu.*Get(MenuArpRandomness{});
+        case kTempoCompression: return menu.*Get(MenuFinalComp{});
+        default:
+        {
+            const auto& k = kTempoKnobs[index];
+            return (f.ui.*Get(UiEncValues{}))[k.page][k.knob];
+        }
+    }
+}
+
+/** As TapeMachine::TurnControl. */
+bool TempoMachine::TurnControl(int index, float target, int maxClicks)
+{
+    auto& f    = *fw_;
+    auto  knob = kTempoKnobs[index];
+    // As TAPE's speed: clicks go to the layer that doesn't step it.
+    if(index == kTempoPitch)
+        knob.shift = !f.options.pitch_shift_quantization;
+    // The knob sets the division instead while synced or with its push held.
+    if(index == kTempoTempo
+       && (f.cManager.getClockMode() != FREE || f.ui.normal_page_.*Get(NormalTransportHeld{})))
+        return false;
+
+    return ClickToward(
+        knob, f.ui.*Get(UiKnobPage{}), target, maxClicks, [&] { return ControlValue(index); },
+        [&](int16_t turns) {
+            return knob.shift ? f.ui.menu_page_.OnEncoderTurned(knob.knob, turns, 0)
+                              : f.ui.normal_page_.OnEncoderTurned(knob.knob, turns, 0);
+        });
+}
+
 void TempoMachine::Process(const float* const* in, float* const* out)
 {
     ScopedContext scope(*ctx_);
@@ -796,6 +882,7 @@ void TempoMachine::Process(const float* const* in, float* const* out)
         }
         if(!imports_.empty())
             ApplyImports();
+        ChaseControls();
     }
 
     DrainPanelEvents();

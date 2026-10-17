@@ -61,6 +61,27 @@ struct ImportTarget
     int                      mode = 0, bank = 0, slot = 0; // the firmware's, for CompleteImports()
 };
 
+/** A panel value a host can automate: what one knob sets on one of its pages
+ *  (or in the shift layer), 0-1 as the firmware keeps it. */
+struct ControlInfo
+{
+    enum class Unit : uint8_t
+    {
+        Percent,
+        Pan,
+        SampleSpeed, // TAPE's sample speed knob: -2x (reverse) to 2x
+        LooperSpeed, // -2x to 2x, linear
+        Semitones,   // -12 to 12, linear
+        Frame,       // a wavetable's 33 frames
+        DelayReverb, // delay below the middle, reverb above
+        Tempo,       // 160-480, the firmware's tempo number
+    };
+    const char* id; // saved in projects with their automation: never change or reuse one
+    const char* name;
+    float       defaultValue; // at power-on with the factory card
+    Unit        unit;
+};
+
 class Machine
 {
   public:
@@ -131,6 +152,20 @@ class Machine
      *  Applied once boot has finished; firmwares without one ignore it. */
     virtual void SetClockSync(bool) {}
 
+    /** The values a host can automate on `firmware`; SetControl() and
+     *  ReadControl() take indices into it. */
+    static const std::vector<ControlInfo>& Controls(Firmware firmware);
+
+    /** Turns the knob that sets control `index` toward `value` from the next
+     *  block on which the unit takes input: clicks through the firmware's own
+     *  handler for that knob and page (or shift layer), until the value is
+     *  within half a click or stops moving. The page on show stays. */
+    void SetControl(int index, float value);
+
+    /** The control's value now; true if it moved other than by SetControl()
+     *  since the last call (panel, MIDI, slot or session change). */
+    bool ReadControl(int index, float& value);
+
     // ---- Any thread ----
 
     /** Queues a panel interaction, applied at the start of the next block.
@@ -155,6 +190,13 @@ class Machine
     /** Next panel event Post() queued; false once drained. */
     bool PopPanelEvent(PanelEvent& event);
 
+    /** Turns the knobs SetControl() asked for; call where the unit takes input. */
+    void ChaseControls();
+    virtual float ControlValue(int) { return 0.f; }
+    /** At most maxClicks clicks of control `index` toward `target`. False to
+     *  carry on next block: more clicks needed, or the firmware takes none now. */
+    virtual bool TurnControl(int, float, int) { return true; }
+
     std::shared_ptr<VirtualCard> card_;
     std::unique_ptr<Context>     ctx_;
     int                          midi_in_channel_ = 0;
@@ -162,6 +204,12 @@ class Machine
 
   private:
     Firmware firmware_;
+
+    // Sized at construction; the audio thread never allocates.
+    std::vector<float>   control_target_;
+    std::vector<float>   control_seen_; // as last read, or as a chase left it
+    std::vector<uint8_t> control_pending_;
+    int                  controls_pending_ = 0;
 
     static constexpr uint32_t kQueueSize = 512;
     PanelEvent                queue_[kQueueSize];

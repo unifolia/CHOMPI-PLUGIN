@@ -20,9 +20,13 @@
 // host <bpm> <playing 1|0>   the host's playhead during renders (playing
 //   starts at beat 0); without it there is none | hostsync <1|0>
 // Renders print the spacing of the plugin's MIDI note-ons (TEMPO's steps).
+// param <id> <value>   set a parameter as a host would (value as the host
+//   sees it, 0-1) | params   print the parameters: value, text, gesture
+//   begin/end counts since the last params
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <map>
 #include <sstream>
 
 #include "../plugin/PluginEditor.h"
@@ -68,6 +72,23 @@ int main(int argc, char** argv)
             juce::Thread::sleep(5);
         }
     };
+
+    // What the processor tells the host: gestures, by parameter.
+    struct GestureCount : juce::AudioProcessorParameter::Listener
+    {
+        std::map<int, std::pair<int, int>> counts;
+        void parameterValueChanged(int, float) override {}
+        void parameterGestureChanged(int index, bool starting) override
+        {
+            (starting ? counts[index].first : counts[index].second)++;
+        }
+    };
+    auto gestures = std::make_unique<GestureCount>();
+    auto listen   = [&] {
+        for(auto* param : processor->getParameters())
+            param->addListener(gestures.get());
+    };
+    listen();
 
     HostPlayHead host;
     bool         hasHost = false;
@@ -221,6 +242,7 @@ int main(int argc, char** argv)
             editor.reset();
             processor = std::make_unique<ChompiProcessor>();
             editor.reset(processor->createEditor());
+            listen();
         }
         else if(op == "render")
         {
@@ -281,10 +303,38 @@ int main(int argc, char** argv)
             writer->writeFromAudioSampleBuffer(out, 0, total);
             std::printf("rendered %s at %.0f Hz, block %d, latency %d\n", file.c_str(), rate, block, processor->getLatencySamples());
         }
+        else if(op == "param")
+        {
+            std::string id;
+            float       value;
+            in >> id >> value;
+            bool found = false;
+            for(auto* param : processor->getParameters())
+                if(auto* p = dynamic_cast<juce::AudioProcessorParameterWithID*>(param); p != nullptr && p->paramID == juce::String(id))
+                {
+                    p->setValueNotifyingHost(value);
+                    found = true;
+                }
+            if(!found)
+                std::fprintf(stderr, "unknown parameter: %s\n", id.c_str());
+        }
+        else if(op == "params")
+        {
+            for(auto* param : processor->getParameters())
+            {
+                const auto  id = dynamic_cast<juce::AudioProcessorParameterWithID*>(param)->paramID;
+                const auto& g  = gestures->counts[param->getParameterIndex()];
+                std::printf("  %-18s %.4f %-8s gestures %d/%d\n", id.toRawUTF8(), param->getValue(),
+                            param->getCurrentValueAsText().toRawUTF8(), g.first, g.second);
+            }
+            gestures->counts.clear();
+        }
         else
             std::fprintf(stderr, "unknown command: %s\n", op.c_str());
     }
 
+    for(auto* param : processor->getParameters())
+        param->removeListener(gestures.get());
     editor.reset();
     processor.reset();
     return 0;

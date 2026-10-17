@@ -17,6 +17,13 @@ constexpr uint32_t kMaxIdleStepMs  = 100;
 
 constexpr const char* kCardFiles = "*.wav;*.json";
 
+// The unit's moves reach the host as gestures that end this long after the
+// last one, so Touch automation writes for the length of a turn.
+constexpr uint32_t kGestureMs = 300;
+
+// Set while the processor reports a move to the host: not a host change.
+thread_local bool reportingMove = false;
+
 // A second of stereo: room for a recording to grow between sizing and copying.
 constexpr size_t kRecordingSlack = 2 * emu::Machine::kSampleRate;
 
@@ -88,6 +95,62 @@ void bootThrough(emu::Machine& machine, const std::atomic<bool>& cancelled)
     }
 }
 
+juce::AudioParameterFloatAttributes controlAttributes(emu::ControlInfo::Unit unit)
+{
+    using Unit = emu::ControlInfo::Unit;
+    // TAPE's speed knob (DSPEngine::SetGlobalPitchFree): 0.01x-0.5x-1x-2x over
+    // each third of a half turn, reverse below the middle.
+    auto speedOf = [](float v) {
+        const float s = v < .5f ? (.5f - v) * -2.f : (v - .5f) * 2.f, a = std::abs(s), sign = s < 0 ? -1.f : 1.f;
+        const float speed = a < .33f ? a * 1.484848f + .01f : a < .66f ? (a - .33f) * 1.515151f + .5f : (a - .66f) * 2.941176f + 1.f;
+        return sign * speed;
+    };
+    auto knobOf = [](float speed) {
+        const float p = std::abs(speed);
+        const float a = p < .5f ? (p - .01f) / 1.484848f : p < 1.f ? (p - .5f) / 1.515151f + .33f : (p - 1.f) / 2.941176f + .66f;
+        return juce::jlimit(0.f, 1.f, .5f + (speed < 0 ? -a : a) * .5f);
+    };
+    auto text = [unit, speedOf](float v, int) -> juce::String {
+        switch(unit)
+        {
+            case Unit::Pan:
+                return v < .495f ? "L" + juce::String(juce::roundToInt((.5f - v) * 200.f))
+                     : v > .505f ? "R" + juce::String(juce::roundToInt((v - .5f) * 200.f))
+                                 : juce::String("C");
+            case Unit::SampleSpeed: return juce::String(speedOf(v), 2) + "x";
+            case Unit::LooperSpeed: return juce::String(v * 4.f - 2.f, 2) + "x";
+            case Unit::Semitones: return juce::String((v - .5f) * 24.f, 1) + " st";
+            case Unit::Frame: return juce::String(juce::roundToInt(v * 32.f) + 1);
+            case Unit::DelayReverb:
+                return v < .495f ? "Delay " + juce::String(juce::roundToInt((.5f - v) * 200.f)) + "%"
+                     : v > .505f ? "Reverb " + juce::String(juce::roundToInt((v - .5f) * 200.f)) + "%"
+                                 : juce::String("Dry");
+            case Unit::Tempo: return juce::String(juce::roundToInt(160.f + v * 320.f));
+            case Unit::Percent: break;
+        }
+        return juce::String(juce::roundToInt(v * 100.f)) + "%";
+    };
+    auto value = [unit, knobOf](const juce::String& t) {
+        const auto  s = t.trim();
+        const float n = s.retainCharacters("-.0123456789").getFloatValue();
+        switch(unit)
+        {
+            case Unit::Pan:
+                return juce::jlimit(0.f, 1.f, .5f + (s.startsWithIgnoreCase("L") ? -n : s.startsWithIgnoreCase("R") ? n : 0.f) / 200.f);
+            case Unit::SampleSpeed: return knobOf(n);
+            case Unit::LooperSpeed: return juce::jlimit(0.f, 1.f, (n + 2.f) / 4.f);
+            case Unit::Semitones: return juce::jlimit(0.f, 1.f, n / 24.f + .5f);
+            case Unit::Frame: return juce::jlimit(0.f, 1.f, (n - 1.f) / 32.f);
+            case Unit::DelayReverb:
+                return juce::jlimit(0.f, 1.f, .5f + (s.startsWithIgnoreCase("D") ? -n : s.startsWithIgnoreCase("R") ? n : 0.f) / 200.f);
+            case Unit::Tempo: return juce::jlimit(0.f, 1.f, (n - 160.f) / 320.f);
+            case Unit::Percent: break;
+        }
+        return juce::jlimit(0.f, 1.f, n / 100.f);
+    };
+    return juce::AudioParameterFloatAttributes().withStringFromValueFunction(text).withValueFromStringFunction(value);
+}
+
 /** Puts a full-velocity four-note chord at the default volume near -4 dBFS
  *  peak on each factory card; raw it peaks at -22.2 (TAPE), -28.0 (WAVE) and
  *  -16.4 dBFS (TEMPO), measured with chompi_render. */
@@ -109,6 +172,32 @@ ChompiProcessor::ChompiProcessor()
                      .withOutput("Line Out", juce::AudioChannelSet::stereo(), true)
                      .withOutput("Headphones", juce::AudioChannelSet::stereo(), false))
 {
+    for(const auto firmware : {emu::Firmware::Tape, emu::Firmware::Wave, emu::Firmware::Tempo})
+    {
+        const auto& infos = emu::Machine::Controls(firmware);
+        auto        group = std::make_unique<juce::AudioProcessorParameterGroup>(
+            juce::String(folderName(firmware)).toLowerCase(), folderName(firmware), " | ");
+        for(size_t i = 0; i < infos.size(); i++)
+        {
+            const auto& info  = infos[i];
+            auto        param = std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{info.id, 1}, info.name, juce::NormalisableRange<float>(0.f, 1.f), info.defaultValue,
+                controlAttributes(info.unit));
+            auto control       = std::make_unique<HostControl>();
+            control->param     = param.get();
+            control->firmware  = firmware;
+            control->index     = int(i);
+            control->hostValue = info.defaultValue;
+            controls_.push_back(std::move(control));
+            group->addChild(std::move(param));
+        }
+        addParameterGroup(std::move(group));
+    }
+    jassert(getParameters().size() == int(controls_.size()));
+    for(auto* param : getParameters())
+        param->addListener(this);
+    startTimerHz(30);
+
     pendingMidi_.resize(kMaxPendingMidi);
     adapter_.prepare(emu::Machine::kSampleRate, 512, OutputStage::kLookahead);
     startMachine(defaultCardFolder(emu::Firmware::Tape), false);
@@ -116,7 +205,74 @@ ChompiProcessor::ChompiProcessor()
 
 ChompiProcessor::~ChompiProcessor()
 {
+    stopTimer();
+    for(auto* param : getParameters())
+        param->removeListener(this);
     stopMachine();
+}
+
+void ChompiProcessor::parameterValueChanged(int index, float value)
+{
+    if(reportingMove || index < 0 || size_t(index) >= controls_.size())
+        return;
+    auto& control = *controls_[size_t(index)];
+    control.hostValue.store(control.param->convertFrom0to1(value), std::memory_order_relaxed);
+    control.hostChanged.store(true, std::memory_order_release);
+    control.hostSerial.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ChompiProcessor::sendControls(emu::Machine& machine)
+{
+    const auto firmware = machine.GetFirmware();
+    for(auto& control : controls_)
+        if(control->firmware == firmware && control->hostChanged.exchange(false, std::memory_order_acquire))
+            machine.SetControl(control->index, control->hostValue.load(std::memory_order_relaxed));
+}
+
+void ChompiProcessor::readControls(emu::Machine& machine)
+{
+    const auto firmware = machine.GetFirmware();
+    for(auto& control : controls_)
+    {
+        // A host value still on its way supersedes the unit's: serial first,
+        // so one arriving after this check is caught by timerCallback().
+        const uint32_t serial = control->hostSerial.load(std::memory_order_acquire);
+        float          value;
+        if(control->firmware == firmware && !control->hostChanged.load(std::memory_order_acquire)
+           && machine.ReadControl(control->index, value))
+        {
+            control->unitValue.store(value, std::memory_order_relaxed);
+            control->unitSerial.store(serial, std::memory_order_relaxed);
+            control->unitChanged.store(true, std::memory_order_release);
+        }
+    }
+}
+
+void ChompiProcessor::timerCallback()
+{
+    const uint32_t now = juce::Time::getMillisecondCounter();
+    for(auto& control : controls_)
+    {
+        auto& param = *control->param;
+        if(control->unitChanged.exchange(false, std::memory_order_acquire))
+        {
+            const float value = control->unitValue.load(std::memory_order_relaxed);
+            if(control->unitSerial.load(std::memory_order_relaxed) != control->hostSerial.load(std::memory_order_acquire)
+               || juce::exactlyEqual(value, param.get()))
+                continue;
+            if(!control->gesture)
+                param.beginChangeGesture();
+            control->gesture    = true;
+            control->lastMoveMs = now;
+            const juce::ScopedValueSetter<bool> reporting(reportingMove, true);
+            param.setValueNotifyingHost(param.convertTo0to1(value));
+        }
+        else if(control->gesture && now - control->lastMoveMs > kGestureMs)
+        {
+            param.endChangeGesture();
+            control->gesture = false;
+        }
+    }
 }
 
 juce::String ChompiProcessor::firmwareName(emu::Firmware firmware)
@@ -513,7 +669,9 @@ void ChompiProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 
     midiOut_      = &midi;
     midiOutLimit_ = numSamples;
+    sendControls(*machine_);
     adapter_.process(inL, inR, outs, numSamples, *this);
+    readControls(*machine_);
     midiOut_ = nullptr;
 
     for(int ch = getTotalNumOutputChannels(); ch < buffer.getNumChannels(); ch++)
@@ -650,6 +808,7 @@ void ChompiProcessor::idleTick()
 
     const uint32_t blocks = elapsed * emu::Machine::kSampleRate / 1000 / kFirmwareBlock;
     uint8_t        msg[3];
+    sendControls(*machine_);
     for(uint32_t b = 0; b < blocks; b++)
     {
         machine_->Process(in, out);
@@ -657,6 +816,7 @@ void ChompiProcessor::idleTick()
         {
         }
     }
+    readControls(*machine_);
 }
 
 void ChompiProcessor::setTogglePlay(bool play)

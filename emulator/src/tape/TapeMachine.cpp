@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "emu_context.h"
+#include "emu_controls.h"
 #include "emu_expose.h"
 #include "emu_session.h"
 
@@ -116,6 +117,29 @@ EMU_EXPOSE(EngineVoiceSlot, daisy::Engine, size_t, voice_slot_);
 EMU_EXPOSE(EngineLooper, daisy::Engine, daisy::LooperEngine, looper);
 #undef EMU_EXPOSE
 
+using namespace controls;
+
+// NormalPage/MenuPage: kEncoderFineStep .003, kEncoderCoarseStep .01.
+constexpr Knob kTapeKnobs[kNumTape] = {
+    {false, 0, 0, 1, .003f}, // speed (see TurnControl)
+    {false, 0, 1, 1, .01f},  // sample gain
+    {false, 1, 0, 3, .009f}, // start
+    {false, 1, 1, 3, .03f},  // attack
+    {false, 2, 0, 3, .009f}, // end
+    {false, 2, 1, 3, .03f},  // release
+    {true, 0, 1, 1, .01f},   // pan
+    {false, 3, 0, 3, .03f},  // reverb/delay
+    {false, 3, 1, 3, .03f},  // lo-fi
+    {false, 3, 2, 3, .03f},  // filter
+    {true, 3, 0, 3, .03f},   // delay time
+    {true, 3, 1, 3, .03f},   // warble
+    {true, 3, 2, 3, .03f},   // resonance
+    {false, 4, 0, 1, .003f}, // looper speed (see TurnControl)
+    {false, 5, 0, 3, .03f},  // volume
+    {false, 5, 1, 3, .03f},  // input gain
+    {true, 5, 0, 3, .03f},   // compression (any page)
+};
+
 class TapeMachine final : public Machine
 {
   public:
@@ -132,6 +156,10 @@ class TapeMachine final : public Machine
     void CompleteImports(std::vector<ImportTarget> imports) override;
     bool IsReady() override;
 
+  protected:
+    float ControlValue(int index) override;
+    bool  TurnControl(int index, float target, int maxClicks) override;
+
   private:
     struct Firmware;
 
@@ -144,6 +172,7 @@ class TapeMachine final : public Machine
     void ApplySession();
     void ApplyRecordings();
     void ApplyImports();
+    void ApplyKnobPage(int knob, int page);
 
     std::unique_ptr<Firmware> fw_;
     uint64_t                  blocks_ = 0;
@@ -596,21 +625,10 @@ void TapeMachine::ApplySession()
         pages[knob] = s.pages[knob] < chompi::knob_num_pages[knob] ? s.pages[knob] : 0;
 
     // NormalPage::Draw re-applies only the page on show; apply every page once.
-    const float magic = enc[0][3];
-    if(f.options.delay_split)
-    {
-        engine.SetReverb(magic < .5f ? 0.f : (magic - .5f) * 2.f);
-        engine.SetDelayFeedback(magic < .5f ? (.5f - magic) * 2.f : 0.f);
-    }
-    else
-    {
-        engine.SetReverb(magic);
-        engine.SetDelayFeedback(magic);
-    }
-    engine.SetSaturate(enc[1][3]);
-    engine.SetFilter(enc[2][3]);
-    engine.SetMainGain(enc[0][5]);
-    engine.SetInputGain(enc[1][5]);
+    for(int page = 0; page < 3; page++)
+        ApplyKnobPage(3, page);
+    ApplyKnobPage(5, 0);
+    ApplyKnobPage(5, 1);
 
     menu.*Get(MenuDelayTime{}) = daisysp::fclamp(s.delayTime, 0.f, 1.f);
     menu.*Get(MenuWarble{})    = daisysp::fclamp(s.warble, 0.f, 1.f);
@@ -626,6 +644,92 @@ void TapeMachine::ApplySession()
     if(s.input < uint8_t(daisy::InputSource::LAST))
         engine.SetInputSource(daisy::InputSource(s.input));
     engine.SetFxPreLooper(s.fxPreLooper);
+}
+
+/** NormalPage::Draw's setters, which apply a knob's value while its page
+ *  shows (and NormalPage is on top), as Draw would with `page` on show (but
+ *  for the volume knob's while the battery level shows). */
+void TapeMachine::ApplyKnobPage(int knob, int page)
+{
+    auto&       f      = *fw_;
+    auto&       engine = f.engine;
+    const float value  = (f.ui.*Get(UiEncValues{}))[page][knob];
+    if(knob == 0 && page == 1)
+    {
+        if(f.ui.GetToggleState()) // Draw skips it in record mode
+            engine.SetGain(value);
+    }
+    else if(knob == 1 && page == 1)
+        engine.SetAttack(value);
+    else if(knob == 2 && page == 1)
+        engine.SetDecay(value);
+    else if(knob == 3 && page == 0)
+    {
+        if(f.options.delay_split)
+        {
+            engine.SetReverb(value < .5f ? 0.f : (value - .5f) * 2.f);
+            engine.SetDelayFeedback(value < .5f ? (.5f - value) * 2.f : 0.f);
+        }
+        else
+        {
+            engine.SetReverb(value);
+            engine.SetDelayFeedback(value);
+        }
+    }
+    else if(knob == 3 && page == 1)
+        engine.SetSaturate(value);
+    else if(knob == 3 && page == 2)
+        engine.SetFilter(value);
+    else if(knob == 5 && page == 0)
+        engine.SetMainGain(value);
+    else if(knob == 5 && page == 1)
+        engine.SetInputGain(value);
+}
+
+float TapeMachine::ControlValue(int index)
+{
+    auto& f    = *fw_;
+    auto& menu = f.ui.menu_page_;
+    switch(index)
+    {
+        case kTapePan: return f.engine.GetPan();
+        case kTapeDelayTime: return menu.*Get(MenuDelayTime{});
+        case kTapeWarble: return menu.*Get(MenuWarble{});
+        case kTapeResonance: return menu.*Get(MenuResonance{});
+        case kTapeCompression: return menu.*Get(MenuFinalComp{});
+        default:
+        {
+            const auto& k = kTapeKnobs[index];
+            return (f.ui.*Get(UiEncValues{}))[k.page][k.knob];
+        }
+    }
+}
+
+/** Clicks as the knob would send them with its page on show (or the shift
+ *  layer held), one handler call per click, so the firmware's own steps,
+ *  limits, per-slot presets and MIDI CC out apply. */
+bool TapeMachine::TurnControl(int index, float target, int maxClicks)
+{
+    auto& f    = *fw_;
+    auto  knob = kTapeKnobs[index];
+    // Speed and looper speed step in fifths and octaves on one layer
+    // (options.json "Pitch Quantize In Shift Menu" picks which) and move
+    // freely on the other: clicks go to the free one.
+    if(index == kTapeSpeed || index == kTapeLooperSpeed)
+        knob.shift = !f.options.pitch_shift_quantization;
+    // Unshifted, the looper knob scrubs while the looper is paused.
+    if(index == kTapeLooperSpeed && !knob.shift && !f.engine.IsLooperPlaying())
+        return false;
+
+    const bool done = ClickToward(
+        knob, f.ui.*Get(UiKnobPage{}), target, maxClicks, [&] { return ControlValue(index); },
+        [&](int16_t turns) {
+            return knob.shift ? f.ui.menu_page_.OnEncoderTurned(knob.knob, turns, 0)
+                              : f.ui.normal_page_.OnEncoderTurned(knob.knob, turns, 0);
+        });
+    if(!knob.shift)
+        ApplyKnobPage(knob.knob, knob.page);
+    return done;
 }
 
 void TapeMachine::RecordingSizes(std::map<std::string, size_t>& out)
@@ -788,6 +892,7 @@ void TapeMachine::Process(const float* const* in, float* const* out)
         }
         if(!imports_.empty())
             ApplyImports();
+        ChaseControls();
     }
 
     DrainPanelEvents();

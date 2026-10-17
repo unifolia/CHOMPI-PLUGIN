@@ -16,7 +16,10 @@
 #include "chompi/Machine.h"
 #include "chompi/VirtualCard.h"
 
-class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockRenderer
+class ChompiProcessor : public juce::AudioProcessor,
+                        private RateAdapter::BlockRenderer,
+                        private juce::AudioProcessorParameter::Listener,
+                        private juce::Timer
 {
   public:
     ChompiProcessor();
@@ -126,6 +129,32 @@ class ChompiProcessor : public juce::AudioProcessor, private RateAdapter::BlockR
 
   private:
     void renderBlock(uint64_t index, const float* const* in, float* const* out) override;
+
+    // Host automation: a parameter per firmware control (emu::Machine::Controls()).
+    // Host changes go to the machine, which turns the knob; the unit's own
+    // moves (panel, MIDI, slot or session change) come back to the host.
+    void parameterValueChanged(int index, float value) override;
+    void parameterGestureChanged(int, bool) override {}
+    void timerCallback() override; // reports the unit's moves
+    /** Audio thread, under machineLock_: before the machine's blocks, then after. */
+    void sendControls(emu::Machine& machine);
+    void readControls(emu::Machine& machine);
+
+    struct HostControl
+    {
+        juce::AudioParameterFloat* param;
+        emu::Firmware              firmware;
+        int                        index; // in Machine::Controls(firmware)
+        std::atomic<float>         hostValue{0};
+        std::atomic<bool>          hostChanged{false}; // until a machine on that firmware takes it
+        std::atomic<uint32_t>      hostSerial{0};      // host changes so far
+        std::atomic<float>         unitValue{0};
+        std::atomic<bool>          unitChanged{false};
+        std::atomic<uint32_t>      unitSerial{0}; // hostSerial when unitValue was read
+        bool                       gesture    = false; // message thread
+        uint32_t                   lastMoveMs = 0;
+    };
+    std::vector<std::unique_ptr<HostControl>> controls_; // parameter index order
 
     struct SyncEvent
     {

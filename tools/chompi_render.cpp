@@ -17,6 +17,8 @@
 //   leds                 print LED state
 //   recordings [dir]     print the RAM recordings (TAPE); with dir, write <dir>/<name>.raw
 //   restore [<name> <file.raw>]...   restore recordings (int16 stereo); unnamed ones reset
+//   control <id> <value> host automation: Machine::SetControl (id as in Controls())
+//   controls             print every control's value, * if it moved other than by control
 // CHOMPI_HP=1 renders the headphone output instead of the line output.
 // Note: the firmware writes options.json/presets.json at boot; use a copy.
 #include <cmath>
@@ -280,6 +282,30 @@ int main(int argc, char** argv)
                 raw.read(reinterpret_cast<char*>(samples.data()), std::streamsize(samples.size() * 2));
             }
             machine.RestoreRecordings(std::move(recordings));
+        }
+        else if(op == "control")
+        {
+            std::string id;
+            float       value;
+            in >> id >> value;
+            const auto& controls = emu::Machine::Controls(firmware);
+            int         index    = -1;
+            for(size_t i = 0; i < controls.size(); i++)
+                if(id == controls[i].id)
+                    index = int(i);
+            if(index < 0)
+                std::fprintf(stderr, "unknown control: %s\n", id.c_str());
+            machine.SetControl(index, value);
+        }
+        else if(op == "controls")
+        {
+            const auto& controls = emu::Machine::Controls(firmware);
+            for(size_t i = 0; i < controls.size(); i++)
+            {
+                float      value;
+                const bool moved = machine.ReadControl(int(i), value);
+                std::printf("  %-18s %.4f%s\n", controls[i].id, value, moved ? " *" : "");
+            }
         }
         else
             std::fprintf(stderr, "unknown command: %s\n", op.c_str());

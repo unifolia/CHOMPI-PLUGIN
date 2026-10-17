@@ -49,7 +49,7 @@ I am working on getting this on Windows/Linux as well.
 | `firmware/<tape, wave, tempo>/src` | the firmwares, portable parts (see `firmware/README.md`) |
 | `firmware/libs` | the subsets of libDaisy, DaisySP and coreJSON they use |
 | `emulator/` | emulated Daisy Seed and one `Machine` per firmware (no JUCE dependency) |
-| `plugin/` | JUCE processor, panel UI, host-rate adapter, output gain and limiter, recordings as FLAC, audio import |
+| `plugin/` | JUCE processor, panel UI, host-rate adapter, output gain and limiter, recordings as FLAC, audio import, host automation |
 | `cards/<tape, wave, tempo>` | factory SD cards |
 | `build.sh` | guided build and install for non-developers |
 | `tools/chompi_render` | headless: script the panel/MIDI/clock, render a WAV (`--firmware`) |

@@ -3,6 +3,7 @@
 #include "chompi/Machine.h"
 
 #include "emu_context.h"
+#include "emu_controls.h"
 #include "emu_expose.h"
 #include "emu_session.h"
 
@@ -132,6 +133,29 @@ EMU_EXPOSE(ClockNewDivPos, clockManager, uint8_t, newDivPos);
 EMU_EXPOSE(ClockDivCounter, clockManager, int, freeEncoderCounter);
 EMU_EXPOSE(ClockDeferredDiv, clockManager, bool, deferredDivChange);
 
+using namespace controls;
+
+// NormalPage: kEncoderFineStep .003, kEncoderCoarseStep .01. Frame and tempo
+// read the engine and clock (ControlValue), a click moving one of each.
+constexpr Knob kWaveKnobs[kNumWave] = {
+    {false, 0, 0, 1, .003f},        // pitch (NormalPage never steps it)
+    {false, 0, 1, 1, 1.f / 32.f},   // wavetable frame
+    {false, 1, 0, 3, .009f},        // attack
+    {false, 1, 1, 3, .03f},         // pitch LFO amount
+    {false, 2, 0, 3, .009f},        // release
+    {false, 2, 1, 3, .03f},         // filter LFO amount
+    {false, 3, 0, 3, .03f},         // delay/reverb
+    {false, 3, 1, 3, .03f},         // filter cutoff
+    {false, 4, 0, 1, 1.f / 320.f},  // tempo
+    {false, 5, 0, 3, .03f},         // volume
+    {false, 5, 1, 3, .03f},         // pan
+    {true, 1, 1, 3, .03f},          // pitch LFO rate
+    {true, 2, 1, 3, .03f},          // filter LFO rate
+    {true, 3, 0, 3, .03f},          // delay time
+    {true, 3, 1, 3, .03f},          // resonance
+    {true, 5, 0, 3, .03f},          // compression (any page)
+};
+
 class WaveMachine final : public Machine
 {
   public:
@@ -142,6 +166,10 @@ class WaveMachine final : public Machine
     bool CaptureSession(Session& out) override;
     void RestoreSession(const Session& session) override;
     bool IsReady() override;
+
+  protected:
+    float ControlValue(int index) override;
+    bool  TurnControl(int index, float target, int maxClicks) override;
 
   private:
     struct Firmware;
@@ -155,6 +183,7 @@ class WaveMachine final : public Machine
     void        CheckSDCardMounted();
     void        DrainPanelEvents();
     void        ApplySession();
+    void        ApplyKnobPage(int knob, int page);
 
     std::unique_ptr<Firmware> fw_;
     uint64_t                  blocks_ = 0;
@@ -649,6 +678,64 @@ bool WaveMachine::IsReady()
     return fw_->rainbow_done && !fw_->loading_screen && !fw_->ui.InRainbows();
 }
 
+/** NormalPage::Draw's setters, which apply a knob's value while its page
+ *  shows, as Draw would with `page` on show (but for the volume knob's while
+ *  the battery level shows). */
+void WaveMachine::ApplyKnobPage(int knob, int page)
+{
+    auto&       engine = fw_->engine;
+    const float value  = (fw_->ui.*Get(UiEncValues{}))[page][knob];
+    switch(knob * 2 + page)
+    {
+        case 1 * 2 + 0: engine.setAttack(value); break;
+        case 1 * 2 + 1: engine.setPitchLfoDepth(value); break;
+        case 2 * 2 + 0: engine.setRelease(value); break;
+        case 2 * 2 + 1: engine.setLfoDepth(value); break;
+        case 3 * 2 + 0: engine.setDelayFeedback(value); break;
+        case 3 * 2 + 1: engine.setMasterCutoff(value); break;
+        case 5 * 2 + 0: engine.setGain(value); break;
+        case 5 * 2 + 1: engine.setPan(value); break;
+        default: break; // knobs 0 and 4: their handler applies them
+    }
+}
+
+float WaveMachine::ControlValue(int index)
+{
+    auto& f    = *fw_;
+    auto& menu = f.ui.menu_page_;
+    switch(index)
+    {
+        case kWaveFrame: return float(f.engine.getCycle()) / float(CYCLES - 1);
+        case kWaveTempo: return float(f.cManager.getTempo() - 160) / 320.f;
+        case kWavePitchLfoRate: return menu.*Get(MenuPitchLfoRate{});
+        case kWaveFilterLfoRate: return menu.*Get(MenuFilterLfoRate{});
+        case kWaveDelayTime: return menu.*Get(MenuDelayTime{});
+        case kWaveResonance: return menu.*Get(MenuResonance{});
+        case kWaveCompression: return menu.*Get(MenuFinalComp{});
+        default:
+        {
+            const auto& k = kWaveKnobs[index];
+            return (f.ui.*Get(UiEncValues{}))[k.page][k.knob];
+        }
+    }
+}
+
+/** As TapeMachine::TurnControl. */
+bool WaveMachine::TurnControl(int index, float target, int maxClicks)
+{
+    auto&       f    = *fw_;
+    const auto& knob = kWaveKnobs[index];
+    const bool  done = ClickToward(
+        knob, f.ui.*Get(UiKnobPage{}), target, maxClicks, [&] { return ControlValue(index); },
+        [&](int16_t turns) {
+            return knob.shift ? f.ui.menu_page_.OnEncoderTurned(knob.knob, turns, 0)
+                              : f.ui.normal_page_.OnEncoderTurned(knob.knob, turns, 0);
+        });
+    if(!knob.shift)
+        ApplyKnobPage(knob.knob, knob.page);
+    return done;
+}
+
 void WaveMachine::Process(const float* const* in, float* const* out)
 {
     ScopedContext scope(*ctx_);
@@ -658,6 +745,8 @@ void WaveMachine::Process(const float* const* in, float* const* out)
         session_pending_ = false;
         ApplySession();
     }
+    if(fw_->rainbow_done)
+        ChaseControls();
 
     DrainPanelEvents();
 
