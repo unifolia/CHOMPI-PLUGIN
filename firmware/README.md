@@ -26,6 +26,13 @@ ARM toolchain notes were dropped; they are in the git history.
 - `tempo/src/SampleManager.h`, `tempo/src/SliceEngine.h`: arithmetic on
   `void*` (a GCC extension, rejected by clang in C++) is done on `char*`, which
   is what GCC does. Six expressions; no change in behaviour.
+- `tape/src/Sampler.h`, `tape/src/DSPEngine.h`: `#include "Limiter.h"` →
+  `"limiter.h"`, the file's name, for case-sensitive file systems (Linux).
+- `tempo/src/SliceEngine.h`, `updateSlices()`: skips voices with `key` -1
+  (never played since `Init`), which indexed `sliceMap[-1]`, the 8 bytes before
+  the array. What sits there depends on the link layout: 0 with the original
+  macOS link, 6647401 once the link changed, a crash at boot. Such a voice is silent and
+  gets its slice set when it starts, so skipping it changes nothing audible.
 
 WAVE compiles unchanged. TEMPO's own release notes ask for GCC 13.3 on ARM;
 here it builds with the host's clang as C++17.

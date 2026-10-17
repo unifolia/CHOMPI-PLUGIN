@@ -584,7 +584,7 @@ class sliceEngine : public BaseEngine {
                 size_t t2 = last_key_tog_ ? mySlices[15].numSamples : mySlices[14].numSamples;
                 myVoices[i].setStartEnd(t1, t2);
             }
-            else {
+            else if (myVoices[i].key >= 0) {
                 myVoices[i].setStartEnd(mySlices[sliceMap[myVoices[i].key]].start, mySlices[sliceMap[myVoices[i].key]].numSamples);
             }
         }

@@ -1,0 +1,157 @@
+name: Build
+
+# Every push to main and every pull request builds and checks CHIMPO on macOS,
+# Windows and Linux. A v* tag, which must match project(VERSION) in
+# CMakeLists.txt, also drafts a GitHub release with the packages.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-15
+            configure: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          - name: Windows-x64
+            os: windows-2025
+            # clang-cl: the firmware uses GCC attributes MSVC's compiler rejects.
+            configure: -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          - name: Linux-x64
+            # The oldest glibc the package then needs: 2.35.
+            os: ubuntu-22.04
+            configure: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install JUCE's Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libxi-dev
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCHIMPO_INSTALL_PLUGINS=OFF -DCHIMPO_BUILD_HOSTCHECK=ON ${{ matrix.configure }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Render each firmware
+        run: |
+          for render in build/chompi_render build/Release/chompi_render.exe; do [[ -f $render ]] && break; done
+          for fw in tape wave tempo; do
+            cp -R cards/$fw build/render-$fw
+            "$render" --firmware $fw build/render-$fw build/render-$fw.wav "wait 6000; note 60 100; wait 1000" \
+              | tail -n 1 | tee build/render-$fw.txt
+            if ! grep -q '^booted=1 ' build/render-$fw.txt || grep -q 'peak=0.0000' build/render-$fw.txt; then
+              echo "::error::$fw didn't boot or stayed silent"
+              exit 1
+            fi
+          done
+
+      # With cards/ out of the way, the plugin can only use its bundle's copy.
+      - name: Load the plugin as a host would
+        run: |
+          root=$(pwd -W 2>/dev/null || pwd) # a Windows path for the plugin on Windows
+          for check in build/chompi_hostcheck_artefacts/Release/chompi_hostcheck{,.exe}; do [[ -f $check ]] && break; done
+          mv cards build/cards-moved
+          CHIMPO_TAPE_CARD="$root/build/check/tape" CHIMPO_WAVE_CARD="$root/build/check/wave" \
+            CHIMPO_TEMPO_CARD="$root/build/check/tempo" "$check" build/Chimpo_artefacts/Release/VST3/CHIMPO.vst3
+          if [[ $RUNNER_OS == macOS ]]; then
+            artefacts=build/Chimpo_artefacts/Release
+            diff -rq "$artefacts/VST3/CHIMPO.vst3/Contents/Resources/Factory Cards" \
+              "$artefacts/AU/CHIMPO.component/Contents/Resources/Factory Cards"
+            mkdir -p ~/Library/Audio/Plug-Ins/Components
+            cp -R "$artefacts/AU/CHIMPO.component" ~/Library/Audio/Plug-Ins/Components/
+            killall -9 AudioComponentRegistrar || true
+            auval -v aumu Tap2 Cdaw
+          fi
+          mv build/cards-moved cards
+
+      - name: Package
+        run: |
+          version=$(sed -n 's/^project(CHIMPO VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            if [[ ${GITHUB_REF_NAME#v} != "$version" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match project(VERSION $version) in CMakeLists.txt"
+              exit 1
+            fi
+          else
+            version="$version-${GITHUB_SHA::7}"
+          fi
+          mkdir -p dist
+          package() { # package <format> <bundle>
+            local name="CHIMPO-$version-${{ matrix.name }}-$1" stage=build/package
+            rm -rf "$stage" && mkdir -p "$stage/$name"
+            cp -R "$2" LICENSE THIRD_PARTY.md TRADEMARKS.md "$stage/$name/"
+            case $RUNNER_OS in
+              macOS) ditto -c -k --norsrc --noextattr --noacl --keepParent "$stage/$name" "dist/$name.zip" ;;
+              Windows) (cd "$stage" && cmake -E tar cf "../../dist/$name.zip" --format=zip "$name") ;;
+              Linux) tar -C "$stage" -czf "dist/$name.tar.gz" "$name" ;;
+            esac
+          }
+          artefacts=build/Chimpo_artefacts/Release
+          if [[ $RUNNER_OS == macOS ]]; then package AU "$artefacts/AU/CHIMPO.component"; fi
+          package VST3 "$artefacts/VST3/CHIMPO.vst3"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: CHIMPO-${{ matrix.name }}
+          path: dist/
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # A draft: check the packages and notes, then publish it on GitHub.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          Unzip the package for your system, move the plugin into your plug-in folder, then rescan plug-ins in your DAW.
+
+          | | |
+          |---|---|
+          | macOS 11+, Apple Silicon and Intel | `CHIMPO.component` to `~/Library/Audio/Plug-Ins/Components` (Logic, GarageBand), `CHIMPO.vst3` to `~/Library/Audio/Plug-Ins/VST3` |
+          | Windows 10+, x64 | `CHIMPO.vst3` to `C:\Program Files\Common Files\VST3` |
+          | Linux x64, glibc 2.35+ (Ubuntu 22.04+) | `CHIMPO.vst3` to `~/.vst3` |
+
+          **macOS:** these builds aren't notarized, so macOS won't load them until you clear the download flag in Terminal, e.g. `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/CHIMPO.component`. Building from source with `./build.sh` avoids this.
+
+          The factory SD cards are inside the plugin. Each firmware copies its card to `Music/CHIMPO` the first time it runs.
+          EOF
+          echo "The plugins link JUCE 9 under the AGPLv3; their source is https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME." >> notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "CHIMPO ${GITHUB_REF_NAME#v}" --notes-file notes.md

@@ -282,14 +282,17 @@ juce::String ChompiProcessor::firmwareName(emu::Firmware firmware)
 
 juce::File ChompiProcessor::factoryCardFolder(emu::Firmware firmware)
 {
-    // Installed per user by the build, or system-wide by an installer; the
-    // source tree's cards/ serves builds that skipped installing.
+    // The build copies them into the plugin bundle, whose binary is
+    // Contents/<MacOS, x86_64-win, x86_64-linux>/ on every OS. The source
+    // tree's cards/ serves what runs outside a bundle (the harness).
     using juce::File;
-    const auto sub = juce::String("Application Support/CHIMPO/Factory Cards/") + folderName(firmware);
-    for(const auto& folder : {File::getSpecialLocation(File::userApplicationDataDirectory).getChildFile(sub),
-                              File::getSpecialLocation(File::commonApplicationDataDirectory).getChildFile(sub)})
-        if(hasCardFiles(folder))
-            return folder;
+    const auto bundled = File::getSpecialLocation(File::currentExecutableFile)
+                             .getParentDirectory()
+                             .getSiblingFile("Resources")
+                             .getChildFile("Factory Cards")
+                             .getChildFile(folderName(firmware));
+    if(hasCardFiles(bundled))
+        return bundled;
     return File(CHIMPO_CARDS).getChildFile(juce::String(folderName(firmware)).toLowerCase());
 }
 
@@ -375,7 +378,7 @@ void ChompiProcessor::startMachine(const juce::File& folder, bool restoreFactory
         // folder the user picks is used as found (empty = blank card).
         if(restoreFactory || (active == defaultFolder && !hasCardFiles(active)))
             copyFactoryCard(firmware, active);
-        auto card = emu::VirtualCard::Open(active.getFullPathName().toStdString());
+        auto card = emu::VirtualCard::Open(std::filesystem::u8path(active.getFullPathName().toStdString()));
         {
             std::vector<CardWrite> writes;
             {

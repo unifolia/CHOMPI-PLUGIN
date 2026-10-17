@@ -8,6 +8,9 @@
 #include <limits>
 #include <map>
 
+// Names are UTF-8 strings. u8path()/u8string() convert at the filesystem
+// boundary: on Windows a plain string() goes through the ANSI code page, which
+// fails on names outside it (a user folder like C:\Users\José).
 namespace fs = std::filesystem;
 
 namespace emu
@@ -78,7 +81,7 @@ std::shared_ptr<VirtualCard> VirtualCard::Open(const fs::path& folder)
     fs::create_directories(folder, ec);
     const fs::path    canonical = fs::weakly_canonical(folder, ec);
     const fs::path    resolved  = ec ? folder : canonical;
-    const std::string key       = resolved.string();
+    const std::string key       = resolved.u8string();
 
     std::lock_guard<std::mutex> lock(registry_mutex);
     if(auto existing = registry[key].lock())
@@ -118,7 +121,7 @@ void VirtualCard::Load()
     std::error_code ec;
     for(const auto& entry : fs::directory_iterator(folder_, ec))
     {
-        const std::string name = entry.path().filename().string();
+        const std::string name = entry.path().filename().u8string();
         if(entry.is_directory(ec) && !name.empty() && name[0] != '.')
         {
             dirs_[KeyFor(name)] = name;
@@ -130,9 +133,9 @@ void VirtualCard::Load()
 void VirtualCard::Load(const std::string& dir)
 {
     std::error_code ec;
-    for(const auto& entry : fs::directory_iterator(dir.empty() ? folder_ : folder_ / dir, ec))
+    for(const auto& entry : fs::directory_iterator(dir.empty() ? folder_ : folder_ / fs::u8path(dir), ec))
     {
-        const std::string leaf = entry.path().filename().string();
+        const std::string leaf = entry.path().filename().u8string();
         const std::string name = dir.empty() ? leaf : dir + "/" + leaf;
         const std::string key  = KeyFor(name);
         if(!entry.is_regular_file(ec) || !IsCardFile(leaf, key))
@@ -266,7 +269,7 @@ bool VirtualCard::MakeDir(const char* path)
         return false;
     const std::string name = Normalize(path);
     std::error_code   ec;
-    fs::create_directories(folder_ / name, ec);
+    fs::create_directories(folder_ / fs::u8path(name), ec);
     if(ec)
         return false;
     dirs_[key] = name;
@@ -408,7 +411,7 @@ void VirtualCard::FlushKey(const std::string& key)
     std::error_code ec;
     if(remove)
     {
-        fs::remove(folder_ / name, ec);
+        fs::remove(folder_ / fs::u8path(name), ec);
         return;
     }
 
@@ -422,9 +425,9 @@ void VirtualCard::FlushKey(const std::string& key)
         std::memcpy(data.data() + pos, files_[size_t(idx)]->data.data() + pos, std::min(kCopyChunk, size - pos));
     }
 
-    const fs::path target = folder_ / name;
+    const fs::path target = folder_ / fs::u8path(name);
     fs::create_directories(target.parent_path(), ec);
-    const fs::path temp = target.parent_path() / ("." + target.filename().string() + ".chimpo-tmp");
+    const fs::path temp = target.parent_path() / fs::u8path("." + target.filename().u8string() + ".chimpo-tmp");
     {
         std::ofstream out(temp, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
