@@ -306,7 +306,7 @@ void ChompiEditor::showFirmwareMenu()
 {
     PopupMenu menu;
     const auto current = processor_.getFirmware();
-    for(const auto firmware : {emu::Firmware::Tape, emu::Firmware::Wave, emu::Firmware::Tempo})
+    for(const auto firmware : {emu::Firmware::Tape, emu::Firmware::Tempo, emu::Firmware::Wave})
     {
         const bool built = emu::Machine::IsBuiltIn(firmware);
         menu.addItem(ChompiProcessor::firmwareName(firmware) + (built ? "" : " (coming soon)"), built, firmware == current,
