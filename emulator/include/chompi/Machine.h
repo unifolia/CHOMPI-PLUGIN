@@ -35,6 +35,8 @@ struct PanelEvent
         Button, // id: switch ID (Panel.h); value: 1 pressed, 0 released
         Turn,   // id: encoder (panel::Encoder); value: detents, + is clockwise
         Toggle, // value: 1 play position, 0 record position
+        Wait,   // value: ms of the unit's time the events queued after it wait (gestures held
+                // for a time); taken by the queue, firmwares never see it
     };
     Type    type;
     int16_t id;
@@ -135,6 +137,11 @@ class Machine
      *  to its power-on state. */
     virtual void RestoreRecordings(Recordings) {}
 
+    /** Frees restored recordings that Process() has applied, so the audio
+     *  thread never frees them (up to 63 MB). Lock-free against Process(),
+     *  but from one thread only. */
+    virtual void FreeSpent() {}
+
     /** Where audio dropped on `button` (Panel.h) goes, given what the panel
      *  shows; false if that key takes none. */
     virtual bool PlanImport(int, ImportTarget&) { return false; }
@@ -172,6 +179,23 @@ class Machine
      *  False if the queue is full. */
     bool Post(const PanelEvent& event);
 
+    /** Posted events no block has taken yet: waiting behind a Wait, or the
+     *  unit isn't running. */
+    bool HasPendingEvents() const
+    {
+        return queue_read_.load(std::memory_order_acquire) != queue_write_.load(std::memory_order_acquire);
+    }
+
+    /** TAPE's looper as of the last block; Empty on the others. */
+    enum class LooperState : uint8_t
+    {
+        Empty,
+        Armed,    // to record from the next note
+        Recorded, // or recording
+        Erasing,  // until done and play and loop are up: takes no arming
+    };
+    LooperState GetLooperState() const { return looper_state_.load(std::memory_order_relaxed); }
+
     /** LED colors as the firmware last sent them, 0x00RRGGBB, still dimmed
      *  (full scale is panel::kPthFullScale / kSmtFullScale). */
     uint32_t PthLed(int index) const;
@@ -201,6 +225,7 @@ class Machine
     std::unique_ptr<Context>     ctx_;
     int                          midi_in_channel_ = 0;
     std::atomic<bool>            booted_{false};
+    std::atomic<LooperState>     looper_state_{LooperState::Empty};
 
   private:
     Firmware firmware_;
@@ -216,6 +241,8 @@ class Machine
     std::atomic<uint32_t>     queue_write_{0};
     std::atomic<uint32_t>     queue_read_{0};
     std::atomic_flag          queue_producer_ = ATOMIC_FLAG_INIT;
+    bool                      waiting_       = false; // on the Wait at the queue's front, until:
+    uint64_t                  wait_until_us_ = 0;
 };
 
 } // namespace emu

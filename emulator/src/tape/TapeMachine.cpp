@@ -88,7 +88,7 @@ bool FromSession(const Session& s, SessionState& st)
     for(int i = 0; i < 18; i++)
         st.knobs[i / 6][i % 6] = knobs[size_t(i)];
     for(int i = 0; i < 6; i++)
-        st.pages[i] = uint8_t(pages[size_t(i)]);
+        st.pages[i] = ToInt<uint8_t>(pages[size_t(i)]);
     st.pan         = GetFloat(s, "pan", .5f);
     st.autoLoop    = GetBool(s, "autoLoop", true);
     st.sustain     = GetBool(s, "sustain", true);
@@ -152,6 +152,7 @@ class TapeMachine final : public Machine
     void RecordingSizes(std::map<std::string, size_t>& out) override;
     void CaptureRecordings(Recordings& out) override;
     void RestoreRecordings(Recordings recordings) override;
+    void FreeSpent() override;
     bool PlanImport(int button, ImportTarget& out) override;
     void CompleteImports(std::vector<ImportTarget> imports) override;
     bool IsReady() override;
@@ -183,6 +184,10 @@ class TapeMachine final : public Machine
     std::vector<int16_t> default_buffer_; // the CHIMPO buffer at power-on: FillDefaultSample()'s tone
     Recordings           recordings_;
     bool                 recordings_pending_ = false;
+    // Applied recordings, for FreeSpent(). Process() fills it only while
+    // spent_ready_ is false, FreeSpent() empties it only while it is true.
+    Recordings        spent_;
+    std::atomic<bool> spent_ready_{false};
 
     std::vector<ImportTarget> imports_; // pending until the first block after boot
 };
@@ -519,6 +524,7 @@ void TapeMachine::DrainPanelEvents()
                     hw.enc[e.id].AddDetents(e.value);
                 break;
             case PanelEvent::Type::Toggle: hw.SetToggle(e.value != 0); break;
+            case PanelEvent::Type::Wait: break; // PopPanelEvent() keeps them
         }
     }
 }
@@ -804,8 +810,23 @@ void TapeMachine::ApplyRecordings()
         engine.looper_reset = true; // NormalPage::Draw resets the looper knob
     }
 
-    recordings_.clear();
+    // Not freed here, on the audio thread. While FreeSpent() hasn't taken the
+    // last ones, these wait in recordings_ for RestoreRecordings() or the
+    // destructor.
+    if(!spent_ready_.load(std::memory_order_acquire))
+    {
+        spent_.swap(recordings_);
+        spent_ready_.store(true, std::memory_order_release);
+    }
     recordings_pending_ = false;
+}
+
+void TapeMachine::FreeSpent()
+{
+    if(!spent_ready_.load(std::memory_order_acquire))
+        return;
+    Recordings().swap(spent_);
+    spent_ready_.store(false, std::memory_order_release);
 }
 
 bool TapeMachine::PlanImport(int button, ImportTarget& out)
@@ -904,6 +925,13 @@ void TapeMachine::Process(const float* const* in, float* const* out)
         SDCallback();
 
     MainLoop();
+
+    auto& looper = fw_->engine.*Get(EngineLooper{});
+    looper_state_.store(looper.GetReset()       ? LooperState::Erasing
+                        : looper.GetRecordArm() ? LooperState::Armed
+                        : looper.GetIsEmpty()   ? LooperState::Empty
+                                                : LooperState::Recorded,
+                        std::memory_order_relaxed);
 }
 
 } // namespace

@@ -21,6 +21,11 @@ constexpr const char* kCardFiles = "*.wav;*.json";
 // last one, so Touch automation writes for the length of a turn.
 constexpr uint32_t kGestureMs = 300;
 
+// TAPE's LooperEngine arms when both keys are down on an empty looper, and
+// CheckReset() erases once they've been down kRecordClearTimeout (2000 ms).
+constexpr int16_t kArmHoldMs   = 100;
+constexpr int16_t kEraseHoldMs = 2200;
+
 // Set while the processor reports a move to the host: not a host change.
 thread_local bool reportingMove = false;
 
@@ -156,11 +161,13 @@ juce::AudioParameterFloatAttributes controlAttributes(emu::ControlInfo::Unit uni
  *  -16.4 dBFS (TEMPO), measured with chompi_render. */
 float outputMakeup(emu::Firmware firmware)
 {
+    static const float tape = juce::Decibels::decibelsToGain(18.f), wave = juce::Decibels::decibelsToGain(24.f),
+                       tempo = juce::Decibels::decibelsToGain(12.f);
     switch(firmware)
     {
-        case emu::Firmware::Tape: return juce::Decibels::decibelsToGain(18.f);
-        case emu::Firmware::Wave: return juce::Decibels::decibelsToGain(24.f);
-        case emu::Firmware::Tempo: return juce::Decibels::decibelsToGain(12.f);
+        case emu::Firmware::Tape: return tape;
+        case emu::Firmware::Wave: return wave;
+        case emu::Firmware::Tempo: return tempo;
     }
     return 1.f;
 }
@@ -250,6 +257,9 @@ void ChompiProcessor::readControls(emu::Machine& machine)
 
 void ChompiProcessor::timerCallback()
 {
+    if(const auto machine = currentMachine())
+        machine->FreeSpent();
+
     const uint32_t now = juce::Time::getMillisecondCounter();
     for(auto& control : controls_)
     {
@@ -336,6 +346,14 @@ void ChompiProcessor::stopMachine()
     // machine on a card writes the card's pending changes.
 }
 
+void ChompiProcessor::clearPending()
+{
+    hasPendingSession_ = hasPendingRecordings_ = false;
+    pendingRecordings_.clear();
+    pendingWrites_.clear();
+    pendingImports_.clear();
+}
+
 void ChompiProcessor::applyPending(emu::Machine& machine)
 {
     machine.Post(toggleEvent(togglePlay_.load()));
@@ -357,15 +375,17 @@ void ChompiProcessor::startMachine(const juce::File& folder, bool restoreFactory
 {
     const std::lock_guard<std::recursive_mutex> lifecycle(lifecycleMutex_);
     stopMachine();
+    const auto firmware = firmware_.load();
     {
         const std::lock_guard<std::mutex> lock(stateMutex_);
-        cardFolder_ = folder;
+        cardFolder_   = folder;
+        cardFirmware_ = firmware;
     }
     loaderCancelled_ = false;
 
     // Copying and loading the card and booting take a moment; the audio thread
     // outputs silence until the machine is published.
-    loader_ = std::thread([this, requested = folder, restoreFactory, fastBoot, firmware = firmware_.load()] {
+    loader_ = std::thread([this, requested = folder, restoreFactory, fastBoot, firmware] {
         // A folder that's gone (project from another Mac, renamed, drive not
         // mounted) would otherwise be recreated as a blank card: run on the
         // default card instead, while the project keeps asking for it.
@@ -465,6 +485,8 @@ juce::String ChompiProcessor::importAudio(const juce::StringArray& files, int bu
     if(plan.empty())
         return "The unit can't take audio there now.";
 
+    // Converted on the calling (message) thread: a 165 s 24-bit 44.1 kHz file
+    // takes ~240 ms on an M2 (2026-10-17), short samples a few ms.
     std::vector<CardWrite>         writes;
     std::vector<emu::ImportTarget> imported;
     emu::Recordings                recordings;
@@ -515,6 +537,8 @@ juce::String ChompiProcessor::importAudio(const juce::StringArray& files, int bu
         if(cut)
             message << " (cut to " << juce::String(plan.front().target.maxSeconds, 0) << " s)";
     }
+    if(const int left = sorted.size() - int(plan.size()); left > 0)
+        message << (message.isEmpty() ? "" : "; ") << left << " more didn't fit";
     if(!unreadable.isEmpty())
         message << (message.isEmpty() ? "" : "; ") << "can't read " << unreadable.joinIntoString(", ");
     return message;
@@ -528,10 +552,7 @@ void ChompiProcessor::setFirmware(emu::Firmware firmware)
     firmware_.store(firmware);
     {
         const std::lock_guard<std::mutex> lock(stateMutex_);
-        hasPendingSession_ = hasPendingRecordings_ = false; // the other firmware's
-        pendingRecordings_.clear();
-        pendingWrites_.clear();
-        pendingImports_.clear();
+        clearPending(); // the other firmware's
     }
     startMachine(defaultCardFolder(firmware), false);
 }
@@ -589,12 +610,21 @@ void ChompiProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     lastProcessMs_.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
 
     const juce::SpinLock::ScopedTryLockType lock(machineLock_);
-    if(!lock.isLocked() || machine_ == nullptr)
+    if(lock.isLocked() && machine_ == nullptr) // no unit to play to
     {
+        pendingHead_ = pendingTail_ = 0;
+        for(auto& held : heldNotes_)
+            held.reset();
         buffer.clear();
         midi.clear();
         return;
     }
+    // Without the unit this block (a save or restore holds it) or with no
+    // audio to render, the MIDI waits for the next block, stamped at its
+    // start: dropped, a note-off would leave its note hanging.
+    const bool render = lock.isLocked() && numSamples > 0;
+    if(render)
+        midiInChannel_ = uint8_t(machine_->MidiInChannel());
 
     // MIDI in, stamped on the firmware timeline. Host buffers are time-ordered
     // and stamps grow across calls, so the queue stays sorted.
@@ -613,7 +643,7 @@ void ChompiProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // Host sync: clock and transport for TEMPO, merged into the host's MIDI
     // by sample position below.
     SyncEvent  sync[kMaxSyncEvents];
-    const int  numSync   = followHost(numSamples, sync);
+    const int  numSync   = render ? followHost(numSamples, sync) : 0;
     int        nextSync  = 0;
     auto       flushSync = [&](int upTo) {
         for(; nextSync < numSync && sync[nextSync].offset <= upTo; nextSync++)
@@ -621,7 +651,7 @@ void ChompiProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     };
 
     const bool    omni      = midiOmni_.load(std::memory_order_relaxed);
-    const uint8_t inChannel = uint8_t(machine_->MidiInChannel());
+    const uint8_t inChannel = midiInChannel_;
     for(const auto meta : midi)
     {
         flushSync(meta.samplePosition);
@@ -631,7 +661,7 @@ void ChompiProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         const bool realtime = meta.numBytes == 1 && raw[0] >= 0xf8 && raw[0] <= 0xfc && !syncFollowing_;
         if(meta.numBytes < 1 || meta.numBytes > 3 || raw[0] < 0x80 || (raw[0] >= 0xf0 && !realtime))
             continue;
-        const double  time   = adapter_.firmwareTimeAt(meta.samplePosition);
+        const double  time   = adapter_.firmwareTimeAt(render ? meta.samplePosition : 0);
         const uint8_t status = omni && !realtime ? uint8_t((raw[0] & 0xf0) | inChannel) : raw[0];
         const uint8_t data1  = meta.numBytes > 1 ? raw[1] & 0x7f : 0;
         const uint8_t data2  = meta.numBytes > 2 ? raw[2] & 0x7f : 0;
@@ -654,6 +684,11 @@ void ChompiProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     }
     flushSync(numSamples);
     midi.clear();
+    if(!render)
+    {
+        buffer.clear();
+        return;
+    }
 
     // Buses share channel memory with the input; the adapter reads each chunk's
     // input before writing its output.
@@ -836,6 +871,46 @@ void ChompiProcessor::post(const emu::PanelEvent& event)
         machine->Post(event);
 }
 
+ChompiProcessor::Looper ChompiProcessor::looperState() const
+{
+    const auto machine = currentMachine();
+    if(machine == nullptr || !machine->IsBooted() || machine->GetFirmware() != emu::Firmware::Tape)
+        return Looper::Off;
+    using State = emu::Machine::LooperState;
+    const auto state = machine->GetLooperState();
+    if(machine->HasPendingEvents() || state == State::Erasing)
+        return Looper::Busy;
+    return state == State::Armed ? Looper::Armed : state == State::Empty ? Looper::Empty : Looper::Recorded;
+}
+
+void ChompiProcessor::armLooper()
+{
+    const auto state = looperState();
+    if(state == Looper::Empty)
+        holdPlayAndLoop(kArmHoldMs);
+    else if(state == Looper::Armed) // the firmware's only way back
+        holdPlayAndLoop(kEraseHoldMs);
+}
+
+void ChompiProcessor::eraseLooper()
+{
+    if(looperState() == Looper::Recorded)
+        holdPlayAndLoop(kEraseHoldMs);
+}
+
+void ChompiProcessor::holdPlayAndLoop(int16_t ms)
+{
+    using Type = emu::PanelEvent::Type;
+    namespace pnl = emu::panel;
+    if(const auto machine = currentMachine())
+        for(const emu::PanelEvent event : {emu::PanelEvent{Type::Button, pnl::kPlayKey, 1},
+                                           emu::PanelEvent{Type::Button, pnl::kLoopKey, 1},
+                                           emu::PanelEvent{Type::Wait, 0, ms},
+                                           emu::PanelEvent{Type::Button, pnl::kLoopKey, 0},
+                                           emu::PanelEvent{Type::Button, pnl::kPlayKey, 0}})
+            machine->Post(event);
+}
+
 bool ChompiProcessor::readLeds(Leds& leds) const
 {
     const auto machine = currentMachine();
@@ -880,12 +955,14 @@ bool ChompiProcessor::captureLive(emu::Session& session, emu::Recordings& record
 void ChompiProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     juce::File      folder;
+    emu::Firmware   firmware;
     emu::Session    session;
     emu::Recordings recordings;
     bool            haveSession = false;
     {
         const std::lock_guard<std::mutex> lock(stateMutex_);
-        folder = cardFolder_;
+        folder   = cardFolder_;
+        firmware = cardFirmware_; // a firmware switch under way changes both at once
         if(live_ != nullptr)
             haveSession = captureLive(session, recordings);
         else if(hasPendingRecordings_)
@@ -897,7 +974,6 @@ void ChompiProcessor::getStateInformation(juce::MemoryBlock& destData)
         }
     }
 
-    const auto       firmware = getFirmware();
     juce::XmlElement xml("CHOMPI");
     xml.setAttribute("firmware", juce::String(folderName(firmware)).toLowerCase());
     xml.setAttribute("cardFolder", folder.getFullPathName());
@@ -1004,14 +1080,17 @@ void ChompiProcessor::setStateInformation(const void* data, int sizeInBytes)
     const auto folder = xml->getBoolAttribute("defaultCard") ? defaultCardFolder(firmware)
                                                              : juce::File(xml->getStringAttribute("cardFolder"));
     const bool switching = firmware != getFirmware();
-    if(switching)
-    {
-        firmware_.store(firmware);
-        const std::lock_guard<std::mutex> lock(stateMutex_);
-        hasPendingSession_ = false;
-    }
     if(switching || (folder != juce::File() && folder != getCardFolder()))
+    {
+        // This project replaces whatever waited for the old machine, an
+        // import included.
+        firmware_.store(firmware);
+        {
+            const std::lock_guard<std::mutex> lock(stateMutex_);
+            clearPending();
+        }
         startMachine(folder != juce::File() ? folder : defaultCardFolder(firmware), false); // before the session, which goes to the new machine
+    }
 
     std::optional<emu::Session> session;
     if(const auto* element = xml->getChildByName("Session"))
@@ -1032,11 +1111,10 @@ void ChompiProcessor::setStateInformation(const void* data, int sizeInBytes)
     }
     else
     {
+        // A project without a session replaces one restored earlier too.
+        hasPendingSession_ = session.has_value();
         if(session)
-        {
-            pendingSession_    = std::move(*session);
-            hasPendingSession_ = true;
-        }
+            pendingSession_ = std::move(*session);
         pendingRecordings_    = std::move(recordings);
         hasPendingRecordings_ = true;
     }

@@ -8,13 +8,14 @@ cmake_minimum_required(VERSION 3.22)
 # string functions' C++ overloads), the emulator's own headers (emu::; each
 # port's names there are its own, its helpers in an anonymous namespace) and
 # its global shims, coreJSON (the same file in all three), clang's terminate
-# helper and GCC's pointer to the exception personality routine. Itanium
-# mangling; Mach-O adds a leading '_'. Debug builds emit the most inline
-# functions, so check one after changing this.
+# helper, GCC's pointer to the exception personality routine and
+# AddressSanitizer's per-object registration flag. Itanium mangling; Mach-O
+# adds a leading '_'. Debug builds emit the most inline functions, so check one
+# after changing this.
 set(shared "^_?(_Z[A-Z]*(St|3emu|9__gnu_cxx)\
 |_Z6(strstr|strchr|memchr|wcschr|wcsstr)|_Z7(strrchr|strpbrk|wcsrchr|wcspbrk|wmemchr)\
 |_Z(11disk_status|12__enable_irq|13__disable_irq|23SCB_CleanDCache_by_Addr)\
-|JSON_|__clang_call_terminate$|DW\\.ref\\.__gxx_personality_v0$)")
+|JSON_|__clang_call_terminate$|DW\\.ref\\.__gxx_personality_v0$|___asan_globals_registered$)")
 
 set(seen "")
 set(clashes "")

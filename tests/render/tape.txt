@@ -1,0 +1,40 @@
+# TAPE on the factory card. IDs: chompi_render's header, chompi/Panel.h.
+wait 5500 # boot: the rainbow animation, input from ~5 s
+# Jammi notes; the speed knob, the magic knob (reverb/delay)
+note 60 100
+wait 400
+off 60
+note 64 90
+wait 200
+turn 3 8
+wait 300
+off 64
+turn 2 6
+note 67 100
+wait 500
+off 67
+# Record the line input into the CHIMPO buffer, then play it from key 15
+input sine 440 0.3
+toggle 0
+wait 400 # switch debounce
+press 5
+wait 600
+release 5
+input off
+toggle 1
+wait 400
+tap 28
+wait 600
+# Looper: record, overdub over a note, then play
+press 34
+release 34
+note 62 100
+wait 800
+press 34
+release 34
+off 62
+wait 600
+tap 33
+wait 800
+turn 5 -4 # volume
+wait 300

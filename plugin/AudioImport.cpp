@@ -59,7 +59,10 @@ bool read(const juce::File& file, double maxSeconds, std::vector<int16_t>& out, 
     for(size_t i = 0; i < lr.size(); i++)
     {
         const float dither = exact ? 0.f : random.nextFloat() - random.nextFloat();
-        out[i] = int16_t(juce::jlimit(-32768.f, 32767.f, std::round(lr[i] * 32768.f + dither)));
+        const float value  = std::round(lr[i] * 32768.f + dither);
+        // A float file's NaN (or what infinities make of the filter) would
+        // pass jlimit, and its conversion is undefined.
+        out[i] = std::isfinite(value) ? int16_t(juce::jlimit(-32768.f, 32767.f, value)) : int16_t(0);
     }
     return true;
 }

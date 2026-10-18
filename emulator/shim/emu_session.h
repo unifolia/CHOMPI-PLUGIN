@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,17 @@
 
 namespace emu::session
 {
+/** A parsed number as T, clamped to T's range, NaN as 0: from a damaged
+ *  state, a plain conversion would be undefined. */
+template <typename T>
+T ToInt(double v)
+{
+    using Limits = std::numeric_limits<T>;
+    if(!(v == v))
+        return T(0);
+    return v <= double(Limits::lowest()) ? Limits::lowest() : v >= double(Limits::max()) ? Limits::max() : T(v);
+}
+
 inline void PutInt(Session& s, const char* name, int v) { s[name] = std::to_string(v); }
 inline void PutBool(Session& s, const char* name, bool v) { s[name] = v ? "1" : "0"; }
 inline void PutFloat(Session& s, const char* name, float v)

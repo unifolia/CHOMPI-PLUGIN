@@ -93,7 +93,7 @@ bool FromSession(const Session& s, SessionState& st)
     for(int i = 0; i < 18; i++)
         st.knobs[i / 6][i % 6] = knobs[size_t(i)];
     for(int i = 0; i < 6; i++)
-        st.pages[i] = uint8_t(pages[size_t(i)]);
+        st.pages[i] = ToInt<uint8_t>(pages[size_t(i)]);
     st.pitchLfoRate    = GetFloat(s, "pitchLfoRate", .58f);
     st.filterLfoRate   = GetFloat(s, "filterLfoRate", .58f);
     st.delayTime       = GetFloat(s, "delayTime", .4f);
@@ -110,8 +110,8 @@ bool FromSession(const Session& s, SessionState& st)
     st.gate            = GetFloat(s, "gate", .5f);
     st.steps.clear();
     for(size_t i = 0; i < steps.size(); i += kStepFields)
-        st.steps.emplace_back(KeyRequest::Type(int(steps[i])), steps[i + 1], int(steps[i + 2]), steps[i + 3],
-                              KeyRequest::Source(int(steps[i + 4])));
+        st.steps.emplace_back(KeyRequest::Type(ToInt<int>(steps[i])), steps[i + 1], ToInt<int>(steps[i + 2]),
+                              steps[i + 3], KeyRequest::Source(ToInt<int>(steps[i + 4])));
     return true;
 }
 
@@ -550,6 +550,7 @@ void WaveMachine::DrainPanelEvents()
                     hw.enc[e.id].AddDetents(e.value);
                 break;
             case PanelEvent::Type::Toggle: hw.SetToggle(e.value != 0); break;
+            case PanelEvent::Type::Wait: break; // PopPanelEvent() keeps them
         }
     }
 }

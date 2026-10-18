@@ -1,0 +1,14 @@
+# TAPE's start and end knobs (encoders 0 and 1), each followed by a note. The
+# start knob didn't move on x86-64 before SampleReader.h's SaturateU32().
+wait 5500
+turn 0 6
+wait 100
+note 60 100
+wait 600
+off 60
+turn 1 -6
+wait 100
+note 60 100
+wait 600
+off 60
+wait 300
