@@ -67,6 +67,13 @@ void ToSession(const SessionState& st, Session& s)
     PutInt(s, "tempo", st.tempo);
     PutInt(s, "clockMode", st.clockMode);
     PutInt(s, "input", st.input);
+    // Only the notes' order and spacing in time matter (ApplySession()):
+    // counted from the oldest, they stay exact as floats, which GetNow()
+    // values past 2^24 ms (4.6 hours) wouldn't.
+    uint32_t oldest = UINT32_MAX;
+    for(const auto& slot : st.slots)
+        for(const auto& n : slot.sequence)
+            oldest = std::min(oldest, n.timestamp_);
     for(int i = 0; i < StateSaver::LAST; i++)
     {
         const auto&       slot   = st.slots[i];
@@ -81,7 +88,7 @@ void ToSession(const SessionState& st, Session& s)
         PutFloats(s, (prefix + "ints").c_str(), ints, int(std::size(ints)), 0);
         std::vector<float> notes;
         for(const auto& n : slot.sequence)
-            notes.insert(notes.end(), {float(n.key_), n.transpose_nn_, float(n.order_), float(n.timestamp_),
+            notes.insert(notes.end(), {float(n.key_), n.transpose_nn_, float(n.order_), float(n.timestamp_ - oldest),
                                        float(n.key_number_), float(n.remove_)});
         PutFloats(s, (prefix + "sequence").c_str(), notes.data(), int(notes.size()));
     }
@@ -96,7 +103,7 @@ bool FromSession(const Session& s, SessionState& st)
     st.engine    = uint8_t(GetInt(s, "engine")) == SLICE ? SLICE : CHROMATIC;
     st.ab        = GetInt(s, "ab") == StateSaver::B ? StateSaver::B : StateSaver::A;
     for(int i = 0; i < 6; i++)
-        st.pages[i] = uint8_t(pages[size_t(i)]);
+        st.pages[i] = ToInt<uint8_t>(pages[size_t(i)]);
     st.tempo     = GetInt(s, "tempo", 320);
     st.clockMode = GetInt(s, "clockMode") == SYNC ? SYNC : FREE;
     st.input     = uint8_t(GetInt(s, "input"));
@@ -117,22 +124,25 @@ bool FromSession(const Session& s, SessionState& st)
                                  &slot.comp,     &slot.in_gain,    &slot.arp_randomness};
         for(size_t k = 0; k < std::size(fields); k++)
             *fields[k] = params[k];
-        slot.sample_slot  = size_t(ints[0]);
-        slot.monitor_mode = size_t(ints[1]);
-        slot.pattern      = size_t(ints[2]);
-        slot.rest_pattern = size_t(ints[3]);
-        slot.clock_div    = size_t(ints[4]);
-        slot.latch_state  = size_t(ints[5]);
+        // The firmware's ranges, rest patterns and clock divisions being
+        // table indices: monitor modes 0-2; patterns, rest patterns and clock
+        // divisions 0-4.
+        slot.sample_slot  = ToInt<size_t>(ints[0]);
+        slot.monitor_mode = std::min<size_t>(ToInt<size_t>(ints[1]), 2);
+        slot.pattern      = std::min<size_t>(ToInt<size_t>(ints[2]), 4);
+        slot.rest_pattern = std::min<size_t>(ToInt<size_t>(ints[3]), 4);
+        slot.clock_div    = std::min<size_t>(ToInt<size_t>(ints[4]), 4);
+        slot.latch_state  = ToInt<size_t>(ints[5]);
         slot.play         = false;
         slot.sequence.clear();
         for(size_t k = 0; k < notes.size(); k += kNoteFields)
         {
             NoteInfo n{};
-            n.key_        = int8_t(notes[k]);
+            n.key_          = std::clamp<int8_t>(ToInt<int8_t>(notes[k]), 0, 31); // a switch ID: keyMap[32]
             n.transpose_nn_ = notes[k + 1];
-            n.order_      = uint8_t(notes[k + 2]);
-            n.timestamp_  = uint32_t(notes[k + 3]);
-            n.key_number_ = int8_t(notes[k + 4]);
+            n.order_        = ToInt<uint8_t>(notes[k + 2]);
+            n.timestamp_    = ToInt<uint32_t>(notes[k + 3]);
+            n.key_number_   = ToInt<int8_t>(notes[k + 4]);
             n.remove_     = notes[k + 5] != 0.f;
             slot.sequence.push_back(n);
         }
@@ -678,6 +688,7 @@ void TempoMachine::DrainPanelEvents()
                     hw.enc[e.id].AddDetents(e.value);
                 break;
             case PanelEvent::Type::Toggle: hw.SetToggle(e.value != 0); break;
+            case PanelEvent::Type::Wait: break; // PopPanelEvent() keeps them
         }
     }
 }

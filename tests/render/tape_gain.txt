@@ -1,0 +1,11 @@
+# Sample gain turned on the panel: the speed knob's second page, then a note.
+# tape_gain_control makes the same change as a host would.
+wait 5500
+tap 3 # encoder switch: page 1
+wait 50
+turn 3 -12 # 0.704 -> 0.584
+wait 200
+note 60 100
+wait 600
+off 60
+wait 300

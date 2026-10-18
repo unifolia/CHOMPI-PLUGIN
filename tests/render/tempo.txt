@@ -1,0 +1,24 @@
+# TEMPO on the factory card, following MIDI clock: a held chord arpeggiates
+# on the clock (its note-ons are in the MIDI out), knobs turned while it runs.
+wait 6000
+sync 1
+clock 120
+midi fa # start
+wait 500
+note 60 100
+note 67 90
+wait 1000
+turn 3 6
+wait 500
+turn 2 4
+wait 500
+off 60
+off 67
+wait 300
+midi fc # stop
+clock 0
+wait 300
+note 64 100 # free-running
+wait 500
+off 64
+wait 500

@@ -12,6 +12,16 @@ namespace daisy
     static const uint16_t kMaxClickSamps = 300; // 6ish ms
     static const uint16_t kMinLoopLen = kMaxFileStreamingSamps / 2;
 
+    // For float * (f_size - header) as the Daisy computes it: its size_t is 32
+    // bits, so with no file open the byte count wraps at 2^32, and its float to
+    // uint32_t conversion (VCVT) saturates. Elsewhere the count wrapped at 2^64
+    // and the conversion was undefined: x86-64 gave 0, so the end points set at
+    // boot were refused, and every start point after them.
+    inline uint32_t SaturateU32(float x)
+    {
+        return !(x > 0.f) ? 0u : x >= 4294967296.f ? 0xFFFFFFFFu : uint32_t(x);
+    }
+
     /** @brief Sampler that uses a file on external media to store the data
      *  This uses a .wav file as the source to be able to be saved/edited
      *  offline as well.
@@ -104,11 +114,11 @@ namespace daisy
             }
             else
             {
-                new_start_point = val * (f_size(&fptr_read) - sizeof(WAV_FormatTypeDef));
+                new_start_point = SaturateU32(val * uint32_t(f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)));
                 new_start_point -= (new_start_point % 4);
                 new_start_point /= 4; // convert bytes to samples
 
-                end_point = fend_ * (f_size(&fptr_read) - sizeof(WAV_FormatTypeDef));
+                end_point = SaturateU32(fend_ * uint32_t(f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)));
                 end_point -= (end_point % 4);
                 end_point /= 4; // convert bytes to samples
             }
@@ -144,7 +154,7 @@ namespace daisy
             }
             else
             {
-                uint32_t start_point = fstart_ * (f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)) + sizeof(WAV_FormatTypeDef);
+                uint32_t start_point = SaturateU32(fstart_ * uint32_t(f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)) + sizeof(WAV_FormatTypeDef));
                 return start_point - (start_point % 4);
             }
         }
@@ -172,11 +182,11 @@ namespace daisy
             }
             else
             {
-                new_end_point = val * (f_size(&fptr_read) - sizeof(WAV_FormatTypeDef));
+                new_end_point = SaturateU32(val * uint32_t(f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)));
                 new_end_point -= (new_end_point % 4);
                 new_end_point /= 4; // convert bytes to samples
 
-                start_point = fstart_ * (f_size(&fptr_read) - sizeof(WAV_FormatTypeDef));
+                start_point = SaturateU32(fstart_ * uint32_t(f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)));
                 start_point -= (start_point % 4);
                 start_point /= 4; // convert bytes to samples
             }
@@ -211,7 +221,7 @@ namespace daisy
             }
             else
             {
-                uint32_t end_point = fend_ * (f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)) + sizeof(WAV_FormatTypeDef);
+                uint32_t end_point = SaturateU32(fend_ * uint32_t(f_size(&fptr_read) - sizeof(WAV_FormatTypeDef)) + sizeof(WAV_FormatTypeDef));
                 return end_point - (end_point % 4);
             }
         }

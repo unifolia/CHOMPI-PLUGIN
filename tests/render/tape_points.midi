@@ -1,0 +1,12 @@
+midi out @5.5020 b0 15 01
+midi out @5.5020 b0 15 02
+midi out @5.5040 b0 15 03
+midi out @5.5040 b0 15 04
+midi out @5.5060 b0 15 05
+midi out @5.5060 b0 15 06
+midi out @6.2020 b0 16 7d
+midi out @6.2020 b0 16 7c
+midi out @6.2040 b0 16 7b
+midi out @6.2040 b0 16 7a
+midi out @6.2060 b0 16 79
+midi out @6.2060 b0 16 78

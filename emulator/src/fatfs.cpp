@@ -1,7 +1,6 @@
 #include "fatfs.h"
 
 #include <cstring>
-#include <vector>
 #include "chompi/VirtualCard.h"
 #include "emu_context.h"
 
@@ -195,15 +194,14 @@ FRESULT f_readdir(DIR* dp, FILINFO* fno)
     if(card == nullptr)
         return FR_NOT_READY;
 
-    std::vector<emu::VirtualCard::DirEntry> entries;
-    card->List(dp->path, entries);
+    emu::VirtualCard::DirEntry entry;
     std::memset(fno, 0, sizeof(*fno));
-    if(dp->index < entries.size())
+    if(card->NextEntry(dp->path, dp->last, entry))
     {
-        const auto& e = entries[dp->index++];
-        fno->fsize    = e.size;
-        fno->fattrib  = e.is_dir ? AM_DIR : AM_ARC;
-        std::strncpy(fno->fname, e.name.c_str(), sizeof(fno->fname) - 1);
+        fno->fsize   = entry.size;
+        fno->fattrib = entry.is_dir ? AM_DIR : AM_ARC;
+        std::strncpy(fno->fname, entry.name, sizeof(fno->fname) - 1);
+        std::strncpy(dp->last, entry.key, sizeof(dp->last) - 1);
     }
     return FR_OK;
 }

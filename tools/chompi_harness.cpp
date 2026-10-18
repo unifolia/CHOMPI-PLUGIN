@@ -16,6 +16,7 @@
 // drag <x> <y> <file>... | drop <x> <y> <file>... | dragexit   the editor's file drag, at canvas coordinates |
 // save <file> | load <file>   plugin state | reopen   new plugin instance |
 // reload   power-cycle on the project's card folder (menu: Reload SD Card) |
+// looper <arm|erase>   TAPE's looper buttons |
 // firmware <tape|wave|tempo>   switch firmware (on its default card) |
 // host <bpm> <playing 1|0>   the host's playhead during renders (playing
 //   starts at beat 0); without it there is none | hostsync <1|0>
@@ -159,6 +160,15 @@ int main(int argc, char** argv)
             const auto t0 = juce::Time::getMillisecondCounterHiRes();
             processor->setStateInformation(state.getData(), int(state.getSize()));
             std::printf("loaded in %.1f ms\n", juce::Time::getMillisecondCounterHiRes() - t0);
+        }
+        else if(op == "looper")
+        {
+            std::string action;
+            in >> action;
+            if(action == "erase")
+                processor->eraseLooper();
+            else
+                processor->armLooper();
         }
         else if(op == "reload")
             processor->insertCard({});

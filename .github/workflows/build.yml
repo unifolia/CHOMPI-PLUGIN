@@ -52,23 +52,13 @@ jobs:
       - name: Configure
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          -DCHIMPO_INSTALL_PLUGINS=OFF -DCHIMPO_BUILD_HOSTCHECK=ON ${{ matrix.configure }}
+          -DCHIMPO_INSTALL_PLUGINS=OFF -DCHIMPO_BUILD_HOSTCHECK=ON -DCHIMPO_BUILD_TESTS=ON ${{ matrix.configure }}
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
-      - name: Render each firmware
-        run: |
-          for render in build/chompi_render build/Release/chompi_render.exe; do [[ -f $render ]] && break; done
-          for fw in tape wave tempo; do
-            cp -R cards/$fw build/render-$fw
-            "$render" --firmware $fw build/render-$fw build/render-$fw.wav "wait 6000; note 60 100; wait 1000" \
-              | tail -n 1 | tee build/render-$fw.txt
-            if ! grep -q '^booted=1 ' build/render-$fw.txt || grep -q 'peak=0.0000' build/render-$fw.txt; then
-              echo "::error::$fw didn't boot or stayed silent"
-              exit 1
-            fi
-          done
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 300
 
       # With cards/ out of the way, the plugin can only use its bundle's copy.
       - name: Load the plugin as a host would

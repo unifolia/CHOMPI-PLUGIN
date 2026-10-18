@@ -17,31 +17,51 @@ namespace emu
 {
 namespace
 {
-/** A firmware path as the card stores it: no drive ("0:") or leading '/'. */
-std::string Normalize(const std::string& path)
+/** A firmware path as the card stores it: no drive ("0:") or leading or
+ *  trailing '/'. */
+std::string_view Normalize(std::string_view path)
 {
-    size_t start = path.compare(0, 2, "0:") == 0 ? 2 : 0;
-    while(start < path.size() && path[start] == '/')
-        start++;
-    std::string out = path.substr(start);
-    while(!out.empty() && out.back() == '/')
-        out.pop_back();
-    return out;
+    if(path.substr(0, 2) == "0:")
+        path.remove_prefix(2);
+    while(!path.empty() && path.front() == '/')
+        path.remove_prefix(1);
+    while(!path.empty() && path.back() == '/')
+        path.remove_suffix(1);
+    return path;
 }
 
-std::string KeyFor(const std::string& path)
+/** Its key, into `key`: FAT names are case-insensitive. */
+void KeyInto(std::string& key, std::string_view path)
 {
-    // FAT names are case-insensitive.
-    std::string key = Normalize(path);
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+    path = Normalize(path);
+    key.assign(path.data(), path.size());
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+}
+
+std::string KeyFor(std::string_view path)
+{
+    std::string key;
+    KeyInto(key, path);
     return key;
 }
 
 /** The directory part of a key ("" for the root). */
-std::string ParentOf(const std::string& key)
+std::string_view ParentOf(std::string_view key)
 {
     const size_t slash = key.rfind('/');
-    return slash == std::string::npos ? std::string() : key.substr(0, slash);
+    return slash == std::string_view::npos ? std::string_view() : key.substr(0, slash);
+}
+
+std::string_view LeafOf(std::string_view name)
+{
+    return name.substr(name.rfind('/') + 1);
+}
+
+void CopyName(char (&to)[256], std::string_view from)
+{
+    const size_t n = std::min(from.size(), sizeof(to) - 1);
+    std::memcpy(to, from.data(), n);
+    to[n] = '\0';
 }
 
 int64_t NowMs()
@@ -70,30 +90,56 @@ constexpr auto    kFlushPoll = std::chrono::milliseconds(250);
 // Mirroring copies under the lock in pieces this size, bounding how long the
 // audio thread can wait on it.
 constexpr size_t kCopyChunk = 64 * 1024;
+
+// Cards by folder. A card's destructor writes its last changes to the folder,
+// after its weak_ptr has expired: `alive` counts instances not destroyed yet,
+// so a new one on the folder waits for those changes instead of loading
+// without them. Never destroyed: a card may outlive static destruction.
+struct Registry
+{
+    std::mutex                                       mutex;
+    std::condition_variable                          destroyed;
+    std::map<std::string, std::weak_ptr<VirtualCard>> cards;
+    std::map<std::string, int>                       alive;
+};
+
+Registry& GetRegistry()
+{
+    static auto* registry = new Registry;
+    return *registry;
+}
 } // namespace
 
 std::shared_ptr<VirtualCard> VirtualCard::Open(const fs::path& folder)
 {
-    static std::mutex                                       registry_mutex;
-    static std::map<std::string, std::weak_ptr<VirtualCard>> registry;
-
     std::error_code ec;
     fs::create_directories(folder, ec);
     const fs::path    canonical = fs::weakly_canonical(folder, ec);
     const fs::path    resolved  = ec ? folder : canonical;
     const std::string key       = resolved.u8string();
 
-    std::lock_guard<std::mutex> lock(registry_mutex);
-    if(auto existing = registry[key].lock())
-        return existing;
+    auto&                        registry = GetRegistry();
+    std::unique_lock<std::mutex> lock(registry.mutex);
+    for(;;)
+    {
+        if(const auto it = registry.cards.find(key); it != registry.cards.end())
+            if(auto existing = it->second.lock())
+                return existing;
+        if(registry.alive.count(key) == 0)
+            break;
+        registry.destroyed.wait(lock);
+    }
 
-    std::shared_ptr<VirtualCard> card(new VirtualCard(resolved));
-    registry[key] = card;
+    std::shared_ptr<VirtualCard> card(new VirtualCard(resolved, key));
+    registry.cards[key] = card;
+    registry.alive[key]++;
     return card;
 }
 
-VirtualCard::VirtualCard(fs::path folder) : folder_(std::move(folder))
+VirtualCard::VirtualCard(fs::path folder, std::string registry_key)
+: folder_(std::move(folder)), registry_key_(std::move(registry_key))
 {
+    key_.reserve(256); // FatFs paths are shorter
     Load();
     flusher_ = std::thread([this] { FlusherLoop(); });
 }
@@ -112,6 +158,17 @@ VirtualCard::~VirtualCard()
         keys.push_back(entry.first);
     for(const auto& key : keys)
         FlushKey(key);
+
+    auto& registry = GetRegistry();
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        if(--registry.alive[registry_key_] == 0)
+        {
+            registry.alive.erase(registry_key_);
+            registry.cards.erase(registry_key_);
+        }
+    }
+    registry.destroyed.notify_all();
 }
 
 // Subfolders: TEMPO keeps samples in folders.
@@ -180,28 +237,28 @@ void VirtualCard::MarkDirty(const std::string& key)
 int VirtualCard::OpenFile(const char* name, bool create, bool truncate, uint32_t* size)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    const std::string           key = KeyFor(name);
-    int                         idx = Lookup(key);
+    KeyInto(key_, name);
+    int idx = Lookup(key_);
 
     if(idx < 0)
     {
         // FatFs can't create a file in a folder that isn't there (FR_NO_PATH).
-        if(!create || !FolderExists(ParentOf(key)))
+        if(!create || !FolderExists(ParentOf(key_)))
             return 0;
         auto file  = std::make_unique<File>();
         file->name = DiskName(name);
-        file->key  = key;
+        file->key  = key_;
         idx        = static_cast<int>(files_.size());
         files_.push_back(std::move(file));
-        by_key_[key] = idx;
-        MarkDirty(key);
+        by_key_[key_] = idx;
+        MarkDirty(key_);
     }
 
     File& file = *files_[size_t(idx)];
     if(truncate && !file.data.empty())
     {
         file.data.clear();
-        MarkDirty(key);
+        MarkDirty(key_);
     }
 
     *size = static_cast<uint32_t>(file.data.size());
@@ -245,7 +302,8 @@ void VirtualCard::Resize(int handle, uint32_t size)
 bool VirtualCard::Exists(const char* name, uint32_t* size)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    const int                   idx = Lookup(KeyFor(name));
+    KeyInto(key_, name);
+    const int idx = Lookup(key_);
     if(idx < 0)
         return false;
     if(size != nullptr)
@@ -256,7 +314,8 @@ bool VirtualCard::Exists(const char* name, uint32_t* size)
 bool VirtualCard::IsDir(const char* path)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return FolderExists(KeyFor(path));
+    KeyInto(key_, path);
+    return FolderExists(key_);
 }
 
 bool VirtualCard::MakeDir(const char* path)
@@ -267,7 +326,7 @@ bool VirtualCard::MakeDir(const char* path)
         return true;
     if(!ParentOf(key).empty()) // Load() reads one level deep
         return false;
-    const std::string name = Normalize(path);
+    const std::string name(Normalize(path));
     std::error_code   ec;
     fs::create_directories(folder_ / fs::u8path(name), ec);
     if(ec)
@@ -276,12 +335,15 @@ bool VirtualCard::MakeDir(const char* path)
     return true;
 }
 
-bool VirtualCard::FolderExists(const std::string& key) const
+bool VirtualCard::FolderExists(std::string_view key) const
 {
-    if(key.empty() || dirs_.count(key))
+    if(key.empty())
         return true;
+    for(const auto& [dir, name] : dirs_)
+        if(dir == key)
+            return true;
     for(const auto& [file, idx] : by_key_)
-        if(file.compare(0, key.size() + 1, key + "/") == 0)
+        if(file.size() > key.size() && file[key.size()] == '/' && std::string_view(file).substr(0, key.size()) == key)
             return true;
     return false;
 }
@@ -290,56 +352,67 @@ bool VirtualCard::FolderExists(const std::string& key) const
  *  '/' would otherwise make it absolute) and with its folder spelled as on
  *  disk, so "/Chromatic/x.wav" lands in an existing "chromatic" folder on a
  *  case-sensitive volume too. */
-std::string VirtualCard::DiskName(const std::string& path) const
+std::string VirtualCard::DiskName(std::string_view path) const
 {
-    const std::string name   = Normalize(path);
+    const std::string name(Normalize(path));
     const size_t      slash  = name.rfind('/');
     const auto        folder = slash == std::string::npos ? dirs_.end() : dirs_.find(KeyFor(name.substr(0, slash)));
     return folder == dirs_.end() ? name : folder->second + name.substr(slash);
 }
 
-bool VirtualCard::List(const char* path, std::vector<DirEntry>& out)
+// Each call scans the folder for the least key after `after`, so listing it
+// all is quadratic, but no call allocates: TEMPO lists its sample folders from
+// the audio thread, a dozen files each.
+bool VirtualCard::NextEntry(const char* path, const char* after, DirEntry& out)
 {
-    out.clear();
-    if(!IsDir(path))
+    std::lock_guard<std::mutex> lock(mutex_);
+    KeyInto(key_, path);
+    if(!FolderExists(key_))
         return false;
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    const std::string           dir = KeyFor(path);
-    std::map<std::string, DirEntry> entries; // by key, so sorted
-    auto add_dir = [&](const std::string& key, const std::string& name) {
-        if(ParentOf(key) == dir)
-            entries.emplace(key, DirEntry{name.substr(name.rfind('/') + 1), 0, true});
+    const std::string_view dir = key_, previous = after;
+    std::string_view       best, best_name;
+    bool                   found = false;
+    auto consider = [&](std::string_view key, std::string_view name, uint32_t size, bool is_dir) {
+        if(ParentOf(key) != dir || key <= previous || (found && key >= best))
+            return;
+        found      = true;
+        best       = key;
+        best_name  = LeafOf(name);
+        out.size   = size;
+        out.is_dir = is_dir;
     };
     for(const auto& [key, name] : dirs_)
-        add_dir(key, name);
+        consider(key, name, 0, true);
     for(const auto& [key, idx] : by_key_)
     {
         const File& file = *files_[size_t(idx)];
-        if(ParentOf(key) == dir)
-            entries[key] = DirEntry{file.name.substr(file.name.rfind('/') + 1), uint32_t(file.data.size()), false};
-        else if(ParentOf(ParentOf(key)) == dir && !ParentOf(key).empty()) // folder created by a write
-            add_dir(ParentOf(key), ParentOf(file.name));
+        consider(key, file.name, uint32_t(file.data.size()), false);
+        if(!ParentOf(key).empty()) // a folder only its files show (created by a write)
+            consider(ParentOf(key), ParentOf(file.name), 0, true);
     }
-    for(auto& [key, entry] : entries)
-        out.push_back(std::move(entry));
-    return true;
+    if(found)
+    {
+        CopyName(out.name, best_name);
+        CopyName(out.key, best);
+    }
+    return found;
 }
 
 bool VirtualCard::Unlink(const char* name)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    const std::string           key = KeyFor(name);
-    const int                   idx = Lookup(key);
+    KeyInto(key_, name);
+    const int idx = Lookup(key_);
     if(idx < 0)
         return false;
 
     File& file = *files_[size_t(idx)];
     file.live  = false;
     std::vector<uint8_t>().swap(file.data);
-    by_key_.erase(key);
-    disk_names_[key] = file.name;
-    MarkDirty(key);
+    by_key_.erase(key_);
+    disk_names_[key_] = file.name;
+    MarkDirty(key_);
     return true;
 }
 

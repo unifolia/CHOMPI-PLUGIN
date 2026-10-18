@@ -62,6 +62,7 @@ class RateAdapter
         double             step = 1; // input samples per output sample
         double             pos  = 0;
         int                half = 0, taps = 0, write = 0;
+        int                silent = 0; // newest frames all zero, up to taps: then outputs are zero, not computed
         std::vector<float> phases; // (kPhases + 1) x taps
         std::vector<float> hist;   // 2 x taps frames, each written twice so the newest taps are contiguous
 

@@ -75,9 +75,9 @@ typedef struct
 
 typedef struct
 {
-    TCHAR    path[256];
-    uint32_t index; // next entry f_readdir returns
-    BYTE     open;
+    TCHAR path[256];
+    TCHAR last[256]; // key of the entry f_readdir returned last ("": none yet)
+    BYTE  open;
 } DIR;
 
 FRESULT f_open(FIL* fp, const TCHAR* path, BYTE mode);

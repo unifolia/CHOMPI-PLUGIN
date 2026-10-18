@@ -1,0 +1,10 @@
+# tape_gain's change by Machine::SetControl: must render the same.
+wait 5500
+wait 60 # tape_gain's tap
+wait 50
+control tape_gain 0.584
+wait 200
+note 60 100
+wait 600
+off 60
+wait 300

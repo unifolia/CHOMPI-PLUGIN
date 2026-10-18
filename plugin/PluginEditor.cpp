@@ -56,6 +56,7 @@ ChompiEditor::ChompiEditor(ChompiProcessor& p)
 
     toggle_ = std::make_unique<Toggle>(input_);
     place(*toggle_, Layout::kToggle);
+    shownTogglePlay_ = input_.togglePlay();
 
     applyTooltips(processor_.getFirmware());
 
@@ -68,6 +69,23 @@ ChompiEditor::ChompiEditor(ChompiProcessor& p)
     firmwareButton_.onClick = [this] { showFirmwareMenu(); };
     firmwareButton_.setTopLeftPosition(20, 5);
     canvas_.addAndMakeVisible(firmwareButton_);
+
+    // TAPE's looper gestures, which take both play and loop at once.
+    armButton_.setTooltip("Arms the looper: recording starts with the next note, from a key or MIDI. Click again to "
+                          "disarm.\nOn the unit: press play and loop together on an empty looper.");
+    armButton_.setSize(70, 20);
+    armButton_.onClick = [this] {
+        gesture_ = true;
+        processor_.armLooper();
+    };
+    eraseButton_.setTooltip("Erases the looper.\nOn the unit: hold play and loop together for 2 s.");
+    eraseButton_.setSize(80, 20);
+    eraseButton_.onClick = [this] {
+        gesture_ = erasing_ = true;
+        processor_.eraseLooper();
+    };
+    canvas_.addChildComponent(armButton_);
+    canvas_.addChildComponent(eraseButton_);
 
     settings_.setTooltip("SD card and MIDI settings");
     settings_.onClick = [this] { showSettingsMenu(); };
@@ -132,6 +150,11 @@ void ChompiEditor::timerCallback()
     }
     if(processor_.getFirmware() != shownFirmware_)
         applyTooltips(processor_.getFirmware());
+    if(input_.togglePlay() != shownTogglePlay_) // a project load moves it too
+    {
+        shownTogglePlay_ = !shownTogglePlay_;
+        toggle_->repaint();
+    }
     if(processor_.isRunning() != wasRunning_ || processor_.isCardMissing() != wasMissing_)
         updateStatus();
     if(statusUntil_ != 0 && Time::getMillisecondCounter() > statusUntil_)
@@ -148,6 +171,7 @@ void ChompiEditor::timerCallback()
     for(auto& key : keys_)
         if(key->smtLed() >= 0)
             key->setBacklight(leds.smt[key->smtLed()]);
+    updateLooperButtons();
 
     // Shift on the computer keyboard holds the CHOMPI key for the shift layer,
     // while the pointer is over the panel and the host is the active app. Not
@@ -174,6 +198,29 @@ void ChompiEditor::updateStatus()
     cardWarning_.setTooltip(warn ? processor_.getCardFolder().getFullPathName()
                                        + " wasn't found. Reconnect it and choose Reload SD Card, or choose another folder."
                                  : String());
+}
+
+void ChompiEditor::updateLooperButtons()
+{
+    using Looper     = ChompiProcessor::Looper;
+    const auto state = processor_.looperState();
+    if(state != Looper::Busy) // a click's key press is Busy for a block or so: keep the last state
+    {
+        looper_  = state;
+        gesture_ = erasing_ = false;
+    }
+    // The gestures need play and loop up and the shift layer closed.
+    const bool ready = !gesture_ && !input_.isDown(pnl::kPlayKey) && !input_.isDown(pnl::kLoopKey)
+                    && !input_.isDown(pnl::kChompiKey);
+
+    armButton_.setVisible(looper_ != Looper::Off);
+    eraseButton_.setVisible(looper_ != Looper::Off);
+    armButton_.setText(looper_ == Looper::Armed ? "Disarm" : "Arm loop", looper_ == Looper::Armed);
+    armButton_.setEnabled(ready && (looper_ == Looper::Empty || looper_ == Looper::Armed));
+    eraseButton_.setText(erasing_ ? "Erasing..." : "Erase loop", false);
+    eraseButton_.setEnabled(ready && looper_ == Looper::Recorded);
+    armButton_.setTopLeftPosition(firmwareButton_.getRight() + 12, firmwareButton_.getY());
+    eraseButton_.setTopLeftPosition(armButton_.getRight() + 6, firmwareButton_.getY());
 }
 
 int ChompiEditor::keyAt(int x, int y) const
@@ -333,6 +380,31 @@ void ChompiEditor::SettingsButton::paint(Graphics& g)
 }
 
 void ChompiEditor::SettingsButton::mouseUp(const MouseEvent& e)
+{
+    if(e.mouseWasClicked() && onClick)
+        onClick();
+}
+
+void ChompiEditor::BarButton::setText(const String& text, bool lit)
+{
+    if(text == text_ && lit == lit_)
+        return;
+    text_ = text;
+    lit_  = lit;
+    repaint();
+}
+
+void ChompiEditor::BarButton::paint(Graphics& g)
+{
+    const auto r = getLocalBounds().toFloat().reduced(1.f);
+    g.setColour(Colour(isEnabled() && isMouseOver() ? 0xffbdbbba : 0xffd1cfce));
+    g.fillRoundedRectangle(r, r.getHeight() * 0.5f);
+    g.setColour(Colour(lit_ ? 0xffb3302a : 0xff6c6a69).withMultipliedAlpha(isEnabled() ? 1.f : 0.45f));
+    g.setFont(FontOptions(12.f));
+    g.drawText(text_, r, Justification::centred, false);
+}
+
+void ChompiEditor::BarButton::mouseUp(const MouseEvent& e)
 {
     if(e.mouseWasClicked() && onClick)
         onClick();

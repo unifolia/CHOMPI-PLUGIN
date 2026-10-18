@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -24,13 +25,17 @@ class VirtualCard
 {
   public:
     /** Loads the card from `folder`, or returns the instance already loaded
-     *  from it. Creates the folder if missing. */
+     *  from it. Creates the folder if missing. While the last instance on the
+     *  folder is still being destroyed, waits for it to write its changes. */
     static std::shared_ptr<VirtualCard> Open(const std::filesystem::path& folder);
 
     /** Writes any pending changes to the folder. */
     ~VirtualCard();
 
-    // ---- FatFs-level operations (thread-safe). Handles are > 0. ----
+    // ---- FatFs-level operations (thread-safe). Handles are > 0. The
+    // firmwares call them from the audio thread: lookups, reads and listing
+    // don't allocate; changes can (a file's first since the last mirroring,
+    // growth, creating, renaming, deleting). ----
     int      OpenFile(const char* name, bool create, bool truncate, uint32_t* size);
     uint32_t Read(int handle, uint32_t pos, void* dst, uint32_t n);
     void     Write(int handle, uint32_t pos, const void* src, uint32_t n);
@@ -47,19 +52,21 @@ class VirtualCard
 
     struct DirEntry
     {
-        std::string name; // without its folder
-        uint32_t    size;
-        bool        is_dir;
+        char     name[256]; // without its folder
+        char     key[256];  // the `after` for the entry that follows
+        uint32_t size;
+        bool     is_dir;
     };
-    /** Entries directly in `path` ("" is the root), sorted by name. False if
-     *  there is no such folder. */
-    bool List(const char* path, std::vector<DirEntry>& out);
+    /** Of the entries directly in `path` ("" is the root), in name order, the
+     *  first after key `after` ("": the first). False at the end, or if there
+     *  is no such folder. */
+    bool NextEntry(const char* path, const char* after, DirEntry& out);
     bool IsDir(const char* path);
     /** A folder in the root (created on disk now); true if it exists after. */
     bool MakeDir(const char* path);
 
   private:
-    explicit VirtualCard(std::filesystem::path folder);
+    VirtualCard(std::filesystem::path folder, std::string registry_key);
     void Load();
     void Load(const std::string& dir);
     void FlusherLoop();
@@ -74,16 +81,18 @@ class VirtualCard
     };
 
     File*       Find(int handle);
-    bool        FolderExists(const std::string& key) const;
-    std::string DiskName(const std::string& path) const;
+    bool        FolderExists(std::string_view key) const;
+    std::string DiskName(std::string_view path) const;
     int   Lookup(const std::string& key) const;
     void  MarkDirty(const std::string& key);
 
     std::filesystem::path folder_;
+    std::string           registry_key_;
 
     // Unlinked files keep their slot: an open FIL may still hold the handle,
     // and it must not come to address a different file.
     mutable std::mutex                           mutex_;
+    std::string                                  key_; // the key a lookup builds, its capacity reused
     std::vector<std::unique_ptr<File>>           files_;
     std::unordered_map<std::string, int>         by_key_; // live files by key
     std::unordered_map<std::string, int64_t>     dirty_;  // key -> last change (ms, steady clock)

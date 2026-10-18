@@ -1,0 +1,24 @@
+# WAVE on the factory card; silent until ~5 s (its boot page hides NormalPage).
+wait 5500
+# A chord; the wavetable frame (speed knob, page 1), magic and attack knobs
+note 60 100
+wait 400
+note 64 90
+note 67 90
+wait 400
+tap 3
+wait 50
+turn 3 8
+wait 300
+turn 2 5
+wait 300
+off 60
+off 64
+off 67
+turn 0 4
+note 55 110
+wait 500
+turn 1 -4 # release
+wait 400
+off 55
+wait 800

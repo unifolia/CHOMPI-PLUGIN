@@ -53,6 +53,21 @@ class ChompiProcessor : public juce::AudioProcessor,
 
     void post(const emu::PanelEvent& event);
 
+    // TAPE's looper, worked by the firmware's own gesture, play and loop held
+    // together: briefly on an empty looper arms it (the next note starts
+    // recording); for 2 s erases it, and disarms.
+    enum class Looper
+    {
+        Off,  // not TAPE, or not running
+        Busy, // erasing, or panel input the unit hasn't taken yet (a gesture still held)
+        Empty,
+        Armed,
+        Recorded, // or recording
+    };
+    Looper looperState() const;
+    void   armLooper(); // or disarm
+    void   eraseLooper();
+
     struct Leds
     {
         juce::Colour pth[emu::panel::kNumPthLeds];
@@ -135,7 +150,7 @@ class ChompiProcessor : public juce::AudioProcessor,
     // moves (panel, MIDI, slot or session change) come back to the host.
     void parameterValueChanged(int index, float value) override;
     void parameterGestureChanged(int, bool) override {}
-    void timerCallback() override; // reports the unit's moves
+    void timerCallback() override; // reports the unit's moves; frees applied restores (Machine::FreeSpent())
     /** Audio thread, under machineLock_: before the machine's blocks, then after. */
     void sendControls(emu::Machine& machine);
     void readControls(emu::Machine& machine);
@@ -173,10 +188,13 @@ class ChompiProcessor : public juce::AudioProcessor,
     };
     static void writeCardFile(emu::VirtualCard& card, const CardWrite& write);
 
+    void holdPlayAndLoop(int16_t ms);
     void startMachine(const juce::File& folder, bool restoreFactory, bool fastBoot = false);
     void stopMachine();
     /** The pending toggle, session, recordings and imports; under stateMutex_. */
     void applyPending(emu::Machine& machine);
+    /** Drops what waits for the next machine; under stateMutex_. */
+    void clearPending();
     /** Under stateMutex_: false when the live machine has no session yet. */
     bool captureLive(emu::Session& session, emu::Recordings& recordings);
     std::shared_ptr<emu::Machine> currentMachine() const;
@@ -184,9 +202,11 @@ class ChompiProcessor : public juce::AudioProcessor,
     emu::Recordings readRecordings(const juce::XmlElement& xml, const void* data, int sizeInBytes);
 
     // Locking: the audio thread only ever try-locks machineLock_, which guards
-    // machine_. Every other thread reaches the machine through live_ under
-    // stateMutex_ (taken before machineLock_ when both are needed), so the GUI
-    // never waits on a whole audio block. Machines are shared, so the last
+    // machine_, so the GUI never waits on a whole audio block; a block that
+    // finds it held renders silence and keeps its MIDI for the next. Every
+    // other thread reaches the machine through live_ under stateMutex_ (taken
+    // before machineLock_ when both are needed), except idleTick(), which runs
+    // machine_ in the audio thread's place. Machines are shared, so the last
     // holder destroys one, and the audio thread never holds a reference.
     juce::SpinLock                machineLock_;
     std::shared_ptr<emu::Machine> machine_;
@@ -194,6 +214,7 @@ class ChompiProcessor : public juce::AudioProcessor,
     mutable std::mutex            stateMutex_;
     std::shared_ptr<emu::Machine> live_;
     juce::File                    cardFolder_;
+    emu::Firmware                 cardFirmware_ = emu::Firmware::Tape; // whose card cardFolder_ is
     emu::Session                  pendingSession_; // from setStateInformation, for the next machine
     bool                          hasPendingSession_ = false;
     emu::Recordings               pendingRecordings_;
@@ -231,6 +252,7 @@ class ChompiProcessor : public juce::AudioProcessor,
     size_t                   pendingTail_  = 0;
     juce::MidiBuffer*        midiOut_      = nullptr;
     int                      midiOutLimit_ = 0;
+    uint8_t                  midiInChannel_ = 0; // the unit's, as of the last block that had it
 
     // Notes held by MIDI input, by channel as sent to the firmware, so All
     // Notes Off can release them (the firmware ignores it).

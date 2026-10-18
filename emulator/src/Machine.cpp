@@ -171,12 +171,27 @@ bool Machine::Post(const PanelEvent& event)
 
 bool Machine::PopPanelEvent(PanelEvent& event)
 {
-    const uint32_t read = queue_read_.load(std::memory_order_relaxed);
-    if(read == queue_write_.load(std::memory_order_acquire))
-        return false;
-    event = queue_[read];
-    queue_read_.store((read + 1) % kQueueSize, std::memory_order_release);
-    return true;
+    for(;;)
+    {
+        const uint32_t read = queue_read_.load(std::memory_order_relaxed);
+        if(read == queue_write_.load(std::memory_order_acquire))
+            return false;
+        event = queue_[read];
+        if(event.type == PanelEvent::Type::Wait)
+        {
+            if(!waiting_)
+            {
+                waiting_       = true;
+                wait_until_us_ = ctx_->clock_us + uint64_t(std::max<int16_t>(event.value, 0)) * 1000;
+            }
+            if(ctx_->clock_us < wait_until_us_)
+                return false;
+            waiting_ = false;
+        }
+        queue_read_.store((read + 1) % kQueueSize, std::memory_order_release);
+        if(event.type != PanelEvent::Type::Wait)
+            return true;
+    }
 }
 
 uint32_t Machine::PthLed(int index) const

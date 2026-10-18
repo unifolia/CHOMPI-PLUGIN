@@ -6,7 +6,7 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(CHIMPO VERSION 0.9.2 LANGUAGES C CXX)
+project(CHIMPO VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ option(CHIMPO_INSTALL_PLUGINS "Copy the built plugins to this user's plug-in fol
     ${chimpo_install_default})
 option(CHIMPO_BUILD_HARNESS "Build chompi_harness: offscreen editor snapshots and host-rate renders" OFF)
 option(CHIMPO_BUILD_HOSTCHECK "Build chompi_hostcheck: loads the built VST3 as a host and plays each firmware" OFF)
+option(CHIMPO_BUILD_TESTS "Build the tests (tests/CMakeLists.txt); run them with ctest" OFF)
 set(CHIMPO_FORMATS "AU;VST3" CACHE STRING "Plugin formats to build (AU, VST3 or both; AU on macOS only)")
 set(CHIMPO_CARDS "${CMAKE_CURRENT_SOURCE_DIR}/cards" CACHE PATH
     "Factory SD cards, one folder per firmware, copied into each plugin bundle")
@@ -237,4 +238,9 @@ if(CHIMPO_BUILD_PLUGIN)
         target_link_libraries(chompi_hostcheck PRIVATE
             juce::juce_audio_processors_headless juce::juce_recommended_config_flags)
     endif()
+endif()
+
+if(CHIMPO_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

@@ -64,6 +64,8 @@ factory cards in `Contents/Resources/Factory Cards`. `-DCHIMPO_FORMATS=AU`
 picks formats. Builds are native-arch; add
 `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` for hosts running under Rosetta.
 `-DFETCHCONTENT_SOURCE_DIR_JUCE=<path>` uses a local JUCE checkout.
+`-DCHIMPO_BUILD_TESTS=ON` builds the tests; `ctest` in the build folder runs
+them (`tests/CMakeLists.txt`).
 
 Every push and pull request is built and checked on all three systems
 (`.github/workflows/build.yml`). Pushing a tag `v<version>`, matching
@@ -82,6 +84,7 @@ packages, to check and publish on GitHub.
 | `build.sh` | guided build and install for non-developers |
 | `cmake/` | build scripts: no two firmwares define the same name; the factory cards into each bundle |
 | `.github/workflows/build.yml` | CI on macOS, Windows and Linux; packages and draft releases |
+| `tests/` | DSP unit tests, firmware renders against references, the plugin as a host drives it |
 | `tools/chompi_render` | headless: script the panel/MIDI/clock, render a WAV (`--firmware`) |
 | `tools/chompi_harness` | `-DCHIMPO_BUILD_HARNESS=ON`: offscreen UI snapshots, state and host-rate tests |
 | `tools/chompi_hostcheck` | `-DCHIMPO_BUILD_HOSTCHECK=ON`: loads the built VST3 as a host and plays each firmware |

@@ -28,6 +28,13 @@ ARM toolchain notes were dropped; they are in the git history.
   is what GCC does. Six expressions; no change in behaviour.
 - `tape/src/Sampler.h`, `tape/src/DSPEngine.h`: `#include "Limiter.h"` →
   `"limiter.h"`, the file's name, for case-sensitive file systems (Linux).
+- `tape/src/SampleReader.h`: the six start/end point expressions
+  `val * (f_size - sizeof(WAV header))` wrap the byte count at 32 bits and
+  convert through `SaturateU32()`, which saturates like the Daisy's VCVT. With
+  no file open the count wrapped at 2^64 and the float was out of `uint32_t`
+  range, which C++ leaves undefined: arm64 saturated, x86-64 gave 0, so there
+  the end points set at boot were refused and the start knob never moved.
+  arm64 renders are unchanged (`tests/render`).
 - `tempo/src/SliceEngine.h`, `updateSlices()`: skips voices with `key` -1
   (never played since `Init`), which indexed `sliceMap[-1]`, the 8 bytes before
   the array. What sits there depends on the link layout: 0 with the original
@@ -35,7 +42,8 @@ ARM toolchain notes were dropped; they are in the git history.
   gets its slice set when it starts, so skipping it changes nothing audible.
 
 WAVE compiles unchanged. TEMPO's own release notes ask for GCC 13.3 on ARM;
-here it builds with the host's clang as C++17.
+here it builds as C++17 with the host's compiler: clang on macOS, clang-cl on
+Windows, GCC (11 in CI) or clang on Linux.
 
 ## Vendored libraries
 
@@ -52,19 +60,26 @@ emulator stand-in (virtual clock), `emulator/shim/sys/system.h`.
 
 The firmwares assume 32-bit ARM. Known differences on a 64-bit host:
 
-- TAPE's `SampleReader` computes `val * (f_size - sizeof(WAV header))` in
-  `size_t`. With no file open this wraps at 2^64 instead of 2^32 before the
-  float to `uint32_t` conversion. Both saturate to the same value for the 0 and
-  1 the firmware passes at init; other values with no file open can differ.
 - `OptionsManager` passes `size_t` to `%d`; arm64 and x86-64 read the low 32
   bits, so the queries are the same.
 - TAPE's `Warble` random seed is a function `static`, shared (unsynchronised)
   by every TAPE unit in a process. It only shapes the lo-fi wobble.
 - TEMPO's `ArpeggiatorSequencer` reads `notes[i][curIdx[i]]` in places
-  without checking for an empty vector (`checkNotePlaying` then discards it).
-  On the STM32 that reads near address 0, which is mapped; on a Mac it faults. The port reserves the
-  vectors' storage at boot so the read stays in owned memory
-  (`emulator/src/tempo/TempoMachine.cpp`).
+  without checking for an empty vector (`checkNotePlaying`, `isKeyPlaying`
+  then discard it). On the STM32 that reads near address 0, which is mapped;
+  on a Mac it faults. The port reserves the vectors' storage at boot so the
+  read stays in owned memory (`emulator/src/tempo/TempoMachine.cpp`); ASan
+  still reports it as a container overflow (`detect_container_overflow=0`).
 - TEMPO's clock manager subtracts `System::GetTick()` values in `size_t`,
   which wraps correctly only where `size_t` is 32 bits; the emulator's tick is
   64-bit.
+
+Firmware bugs that act the same on the Daisy, left as released, which ASan
+and UBSan report (`ctest` in a `-fsanitize=address,undefined` build,
+2026-10-17; over those scenarios, nothing else in the firmwares or the
+emulator):
+
+- TAPE's `PresetManager::GetValue` reads `values_valid[mode][bank][14]`, one
+  past the end, for the CHIMPO buffer's slot before discarding the result.
+- TEMPO's `clockManager::averageMidiClock` overflows `int` in `138 * d * d`
+  at slow MIDI clock tempos: undefined, in practice a 32-bit wrap on both.

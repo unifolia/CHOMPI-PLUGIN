@@ -33,6 +33,7 @@ class ChompiEditor : public juce::AudioProcessorEditor, public juce::FileDragAnd
     void showSettingsMenu();
     void showFirmwareMenu();
     void updateStatus();
+    void updateLooperButtons();
     void applyTooltips(emu::Firmware firmware);
 
     struct SettingsButton : juce::Component, juce::SettableTooltipClient
@@ -40,6 +41,22 @@ class ChompiEditor : public juce::AudioProcessorEditor, public juce::FileDragAnd
         std::function<void()> onClick;
         void                  paint(juce::Graphics&) override;
         void                  mouseUp(const juce::MouseEvent&) override;
+    };
+
+    /** A text button in the bar above the panel; dimmed while disabled. */
+    struct BarButton : juce::Component, juce::SettableTooltipClient
+    {
+        std::function<void()> onClick;
+        void                  setText(const juce::String& text, bool lit);
+        void                  paint(juce::Graphics&) override;
+        void                  mouseUp(const juce::MouseEvent&) override;
+        void                  mouseEnter(const juce::MouseEvent&) override { repaint(); }
+        void                  mouseExit(const juce::MouseEvent&) override { repaint(); }
+        void                  enablementChanged() override { repaint(); }
+
+      private:
+        juce::String text_;
+        bool         lit_ = false;
     };
 
     struct FirmwareButton : juce::Component, juce::SettableTooltipClient
@@ -66,6 +83,10 @@ class ChompiEditor : public juce::AudioProcessorEditor, public juce::FileDragAnd
     std::unique_ptr<panel_ui::Toggle>             toggle_;
     std::array<panel_ui::Key*, 40>                keyByButton_{};
     FirmwareButton                                firmwareButton_;
+    BarButton                                     armButton_, eraseButton_; // TAPE's looper
+    ChompiProcessor::Looper                       looper_  = ChompiProcessor::Looper::Off; // last not Busy
+    bool                                          gesture_ = false; // one of theirs, until the unit has taken it
+    bool                                          erasing_ = false;
     juce::Label                                   cardWarning_;
     juce::Label                                   status_; // same place, takes precedence
     uint32_t                                      statusUntil_ = 0;
@@ -76,10 +97,11 @@ class ChompiEditor : public juce::AudioProcessorEditor, public juce::FileDragAnd
     juce::TooltipWindow                           tooltips_{this, 700};
     std::unique_ptr<juce::FileChooser>            chooser_;
 
-    bool shiftHeld_    = false;
-    int  generation_   = -1;
-    bool wasRunning_   = false;
-    bool wasMissing_   = false;
+    bool shiftHeld_       = false;
+    int  generation_      = -1;
+    bool wasRunning_      = false;
+    bool wasMissing_      = false;
+    bool shownTogglePlay_ = true; // as toggle_ last painted it
 
     emu::Firmware shownFirmware_ = emu::Firmware::Tape; // whose tooltips are up
 
