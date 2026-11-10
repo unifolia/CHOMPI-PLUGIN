@@ -43,7 +43,7 @@ foreach ($installed in $pairs.Keys) {
 # The licence page is the same notice as the installed file, and it says what
 # these builds are: MIT code, JUCE under the AGPLv3, with the source location.
 $page = Get-Content -LiteralPath 'target\windows-licences\licence-page.txt' -Raw -Encoding UTF8
-$notice = Get-Content -LiteralPath "$app\NOTICE.txt" -Raw -Encoding UTF8
+$notice = (Get-Content -LiteralPath "$app\NOTICE.txt" -Raw -Encoding UTF8) -replace '\s+', ' '
 if (-not $page.Contains('GNU Affero General Public License')) { throw 'The licence page does not name the AGPLv3' }
 if (-not $notice.Contains('MIT License')) { throw 'The installed NOTICE.txt has no MIT licence' }
 if (-not $notice.Contains('github.com/unifolia/CHIMPO-PLUGIN')) { throw 'The notice does not name the source' }

@@ -112,7 +112,8 @@ def check_installed(formats: tuple) -> None:
     # CHIMPO's own licence is the MIT text; the notice must name the AGPLv3
     # (these builds link JUCE under it) and where the source is.
     licence = (LICENCES / "LICENSE").read_text(encoding="utf-8")
-    notice_text = (LICENCES / "NOTICE.txt").read_text(encoding="utf-8")
+    # The installed notice is wrapped: compare on one line.
+    notice_text = " ".join((LICENCES / "NOTICE.txt").read_text(encoding="utf-8").split())
     if "MIT License" not in licence:
         vf.fail(f"{LICENCES / 'LICENSE'} is not the MIT licence")
     for mark in ("GNU Affero General Public License", "github.com/unifolia/CHIMPO-PLUGIN"):

@@ -25,8 +25,10 @@ check_licences() {  # dir
     same "$1/LICENSE" LICENSE
     same "$1/NOTICE.txt" "$tmp/NOTICE.expected"
     grep -q 'MIT License' "$1/LICENSE"
-    grep -q 'GNU Affero General Public License' "$1/NOTICE.txt"
-    grep -q 'github.com/unifolia/CHIMPO-PLUGIN' "$1/NOTICE.txt"
+    # The installed notice is wrapped, so phrases can cross a line break.
+    notice=$(tr '\n' ' ' < "$1/NOTICE.txt")
+    printf '%s' "$notice" | grep -q 'GNU Affero General Public License'
+    printf '%s' "$notice" | grep -q 'github.com/unifolia/CHIMPO-PLUGIN' 
     test -f "$1/THIRD_PARTY.md"
     test -n "$(ls -A "$1/notices")"
     test -f "$1/notices/AGPL-3.0.txt"
