@@ -100,7 +100,43 @@ class Allowed:
     matches: Callable[[Failure], bool] = lambda f: True
 
 
-EXCEPTIONS: list = []
+EXCEPTIONS: list = [
+    # --- Real-time safety (auval-rt) -------------------------------------
+    # Apple's AudioUnitSDK locks a std::recursive_mutex in AUBase::DoRender
+    # (RenderCallbackList::foreach) on every render while the host has a render
+    # notification registered, as in every AU built on it.
+    Allowed("auval-rt", re.escape("pthread_mutex_lock from ausdk::AUMethodRender"), KNOWN_BUG,
+            "Apple's AudioUnitSDK locks a recursive_mutex in AUBase::DoRender on every "
+            "render. Every AU built on it does this. To be reported to Apple"),
+    # JUCE's AUv2 wrapper takes incomingMidiLock (a CriticalSection) in
+    # JuceAU::Render around its MIDI handling, as every JUCE-built AU does.
+    Allowed("auval-rt", re.escape("pthread_mutex_lock from JuceAU::Render"), KNOWN_BUG,
+            "JUCE's AUv2 wrapper locks incomingMidiLock in JuceAU::Render around MIDI "
+            "delivery. Every JUCE AU does this; an upstream JUCE fix is needed"),
+    # The emulated SD card keeps a std::mutex over every file operation, and the
+    # firmware reads the card from the render thread. A background mirror holds
+    # the same mutex while it copies a new card. Ours to fix: the card views
+    # need to become lock-free (or double-buffered) on the read path.
+    Allowed("auval-rt", re.escape("pthread_mutex_lock from emu::VirtualCard::")
+            + r"(Exists|IsDir|OpenFile|Read)", KNOWN_BUG,
+            "emu::VirtualCard locks a std::mutex around each file operation and the "
+            "firmware reads the card on the render thread; the card-mirroring thread "
+            "holds the same lock. Needs a lock-free read path. Ours to fix"),
+    Allowed("auval-rt", re.escape("pthread_mutex_lock from ChompiProcessor::renderBlock"), KNOWN_BUG,
+            "The VirtualCard mutex above, inlined into renderBlock. Ours to fix"),
+    Allowed("auval-rt", re.escape("free from ChompiProcessor::processBlock"), KNOWN_BUG,
+            "A free on the render thread inside processBlock, not seen by "
+            "tests/plugin_test.cpp because its allocation counter hooks operator "
+            "new/delete and this path reaches malloc/free directly. To be located "
+            "and removed"),
+    # CHOMPI's released firmware calls sprintf on the audio thread (its SD-card
+    # file bookkeeping), and libc's printf frees internally. The firmware stays
+    # as released (CLAUDE.MD invariant), so this cannot be fixed in this repo.
+    Allowed("auval-rt", re.escape("free from daisy_tape::") + r"[\w:]+", KNOWN_BUG,
+            "CHOMPI's released firmware formats file names with sprintf on the audio "
+            "thread, and libc's printf frees internally. The firmware stays as "
+            "released; a CHOMPI firmware fix would be needed upstream"),
+]
 
 
 def fail(message: str) -> NoReturn:

@@ -41,6 +41,25 @@ Don't run the AU script while a host has CHIMPO open.
 Run only some checks with `--only`, e.g. `python3 scripts/validate_formats.py
 --only pluginval`.
 
+## Known real-time-safety findings (`auval-rt`)
+
+`auval`'s dtrace pass watches the render thread and reports each blocking call.
+On the 1.0.1 build it found ten, in three groups. They are narrow `KNOWN_BUG`
+exceptions in `scripts/validate_formats.py`: every run prints them as CI
+warnings, and they stay open until fixed or accepted.
+
+| Where | Cause | Whose |
+|---|---|---|
+| `ausdk::AUMethodRender` | Apple's AudioUnitSDK locks a `recursive_mutex` in `AUBase::DoRender` on every render. Every AU built on it does this | Apple's SDK; same finding as Marcasite |
+| `JuceAU::Render` | JUCE's AUv2 wrapper takes `incomingMidiLock` around MIDI delivery | JUCE, upstream |
+| `emu::VirtualCard::{Exists,IsDir,OpenFile,Read}`, `ChompiProcessor::renderBlock` | the emulated SD card takes a `std::mutex` per file operation, and the firmware reads the card on the render thread; a background mirror holds the same lock | ours; needs a lock-free read path |
+| `ChompiProcessor::processBlock` | a `free` on the render thread. `tests/plugin_test.cpp` does not see it: its counter hooks `operator new/delete`, and this path reaches `malloc`/`free` | ours; to be located |
+| `daisy_tape::{Engine::UpdateFileExists,FileCopier::NeedsOverwrite}` | the released CHOMPI firmware calls `sprintf` on the audio thread, and libc's `printf` frees internally | CHOMPI's firmware, which stays as released |
+
+Shipping with any of these open needs the owner's agreement; the first two
+need upstream fixes, the middle two are ours, and the last cannot change
+without diverging from the firmware.
+
 ## What no validator covers
 
 CHIMPO is an instrument, so the Bellcast effect requirements for a host bypass
