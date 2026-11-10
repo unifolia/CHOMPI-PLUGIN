@@ -68,7 +68,10 @@ picks formats. Builds are native-arch; add
 them (`tests/CMakeLists.txt`).
 
 Every push and pull request is built and checked on all three systems
-(`.github/workflows/build.yml`). Pushing a tag `v<version>`, matching
+(`.github/workflows/build.yml`), including the format validators: Steinberg's
+VST3 validator, pluginval at strictness 10, and `auval -strict` on the AU.
+[`docs/VALIDATION.md`](docs/VALIDATION.md) says what runs, how to run it
+locally, and what still needs a real host. Pushing a tag `v<version>`, matching
 `project(VERSION)` in `CMakeLists.txt`, also drafts a release with the
 packages, to check and publish on GitHub.
 
@@ -83,7 +86,9 @@ packages, to check and publish on GitHub.
 | `cards/<tape, wave, tempo>` | factory SD cards |
 | `build.sh` | guided build and install for non-developers |
 | `cmake/` | build scripts: no two firmwares define the same name; the factory cards into each bundle |
-| `.github/workflows/build.yml` | CI on macOS, Windows and Linux; packages and draft releases |
+| `.github/workflows/build.yml` | CI on macOS, Windows and Linux; validators; packages and draft releases |
+| `scripts/` | format and AU validators, the release-tag check |
+| `docs/VALIDATION.md` | what is checked automatically, and what needs a host |
 | `tests/` | DSP unit tests, firmware renders against references, the plugin as a host drives it |
 | `tools/chompi_render` | headless: script the panel/MIDI/clock, render a WAV (`--firmware`) |
 | `tools/chompi_harness` | `-DCHIMPO_BUILD_HARNESS=ON`: offscreen UI snapshots, state and host-rate tests |

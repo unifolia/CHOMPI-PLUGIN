@@ -43,7 +43,9 @@ class ChompiProcessor : public juce::AudioProcessor,
     int                getNumPrograms() override { return 1; }
     int                getCurrentProgram() override { return 0; }
     void               setCurrentProgram(int) override {}
-    const juce::String getProgramName(int) override { return {}; }
+    // JUCE exposes this single program as VST3's "Factory Presets" list;
+    // Steinberg's validator fails a program with no name, so it has one.
+    const juce::String getProgramName(int) override { return "Default"; }
     void               changeProgramName(int, const juce::String&) override {}
 
     void getStateInformation(juce::MemoryBlock& destData) override;
