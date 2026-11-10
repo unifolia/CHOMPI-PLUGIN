@@ -22,7 +22,7 @@ AppVersion={#AppVersion}
 AppVerName=CHIMPO {#AppVersion}
 AppPublisher=Bellcast Engineering
 AppPublisherURL=https://bellcast.engineering
-AppSupportURL=https://github.com/unifolia/CHIMPO-PLUGIN
+AppSupportURL=https://github.com/unifolia/CHOMPI-PLUGIN
 VersionInfoVersion={#AppVersion}
 VersionInfoProductName=CHIMPO
 ; Paths below are relative to the repository root.

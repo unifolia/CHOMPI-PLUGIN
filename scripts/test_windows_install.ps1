@@ -46,7 +46,7 @@ $page = Get-Content -LiteralPath 'target\windows-licences\licence-page.txt' -Raw
 $notice = (Get-Content -LiteralPath "$app\NOTICE.txt" -Raw -Encoding UTF8) -replace '\s+', ' '
 if (-not $page.Contains('GNU Affero General Public License')) { throw 'The licence page does not name the AGPLv3' }
 if (-not $notice.Contains('MIT License')) { throw 'The installed NOTICE.txt has no MIT licence' }
-if (-not $notice.Contains('github.com/unifolia/CHIMPO-PLUGIN')) { throw 'The notice does not name the source' }
+if (-not $notice.Contains('github.com/unifolia/CHOMPI-PLUGIN')) { throw 'The notice does not name the source' }
 $notices = @(Get-ChildItem "$app\notices" -File -Recurse).Count
 if ($notices -eq 0) { throw 'No licence notices installed' }
 if (-not (Test-Path "$app\notices\AGPL-3.0.txt")) { throw 'The AGPLv3 text is not installed' }

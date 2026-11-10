@@ -116,7 +116,7 @@ def check_installed(formats: tuple) -> None:
     notice_text = " ".join((LICENCES / "NOTICE.txt").read_text(encoding="utf-8").split())
     if "MIT License" not in licence:
         vf.fail(f"{LICENCES / 'LICENSE'} is not the MIT licence")
-    for mark in ("GNU Affero General Public License", "github.com/unifolia/CHIMPO-PLUGIN"):
+    for mark in ("GNU Affero General Public License", "github.com/unifolia/CHOMPI-PLUGIN"):
         if mark not in notice_text:
             vf.fail(f"the installed NOTICE.txt does not mention {mark!r}")
     want = {RECEIPT + c: VERSION for c in (*formats, "licenses")}

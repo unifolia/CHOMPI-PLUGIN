@@ -28,7 +28,7 @@ check_licences() {  # dir
     # The installed notice is wrapped, so phrases can cross a line break.
     notice=$(tr '\n' ' ' < "$1/NOTICE.txt")
     printf '%s' "$notice" | grep -q 'GNU Affero General Public License'
-    printf '%s' "$notice" | grep -q 'github.com/unifolia/CHIMPO-PLUGIN' 
+    printf '%s' "$notice" | grep -q 'github.com/unifolia/CHOMPI-PLUGIN' 
     test -f "$1/THIRD_PARTY.md"
     test -n "$(ls -A "$1/notices")"
     test -f "$1/notices/AGPL-3.0.txt"

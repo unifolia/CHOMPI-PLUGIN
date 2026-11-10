@@ -19,7 +19,7 @@ import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY = "https://github.com/unifolia/CHIMPO-PLUGIN"
+REPOSITORY = "https://github.com/unifolia/CHOMPI-PLUGIN"
 
 
 def version() -> str:
