@@ -111,10 +111,8 @@ jobs:
             artefacts=build/Chimpo_artefacts/Release
             diff -rq "$artefacts/VST3/CHIMPO.vst3/Contents/Resources/Factory Cards" \
               "$artefacts/AU/CHIMPO.component/Contents/Resources/Factory Cards"
-            mkdir -p ~/Library/Audio/Plug-Ins/Components
-            cp -R "$artefacts/AU/CHIMPO.component" ~/Library/Audio/Plug-Ins/Components/
-            killall -9 AudioComponentRegistrar || true
-            auval -v aumu Tap2 Cdaw
+            # The AU's own load is validate_au.py's job; installing it here would
+            # leave a second CHIMPO AU registered for the install test to find.
           fi
           mv build/cards-moved cards
 
