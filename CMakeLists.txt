@@ -27,7 +27,7 @@ option(CHIMPO_INSTALL_PLUGINS "Copy the built plugins to this user's plug-in fol
 option(CHIMPO_BUILD_HARNESS "Build chompi_harness: offscreen editor snapshots and host-rate renders" OFF)
 option(CHIMPO_BUILD_HOSTCHECK "Build chompi_hostcheck: loads the built VST3 as a host and plays each firmware" OFF)
 option(CHIMPO_BUILD_TESTS "Build the tests (tests/CMakeLists.txt); run them with ctest" OFF)
-set(CHIMPO_FORMATS "AU;VST3" CACHE STRING "Plugin formats to build (AU, VST3 or both; AU on macOS only)")
+set(CHIMPO_FORMATS "AU;VST3;CLAP" CACHE STRING "Plugin formats to build (AU, VST3, CLAP; AU on macOS only)")
 set(CHIMPO_CARDS "${CMAKE_CURRENT_SOURCE_DIR}/cards" CACHE PATH
     "Factory SD cards, one folder per firmware, copied into each plugin bundle")
 
@@ -152,6 +152,26 @@ if(CHIMPO_BUILD_PLUGIN)
         GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(JUCE)
 
+    # JUCE 9 has no CLAP export: clap-juce-extensions (MIT) wraps the same
+    # AudioProcessor. Pinned by commit, like JUCE; its two submodules are the
+    # CLAP headers and helpers.
+    if("CLAP" IN_LIST CHIMPO_FORMATS)
+        FetchContent_Declare(clap_juce_extensions
+            GIT_REPOSITORY https://github.com/free-audio/clap-juce-extensions.git
+            GIT_TAG 6bde108329ff9fc24404b79b8b397261a75cf6a8
+            GIT_SUBMODULES "clap-libs")
+        FetchContent_MakeAvailable(clap_juce_extensions)
+    endif()
+
+    # juce_add_plugin takes the formats JUCE itself exports; the CLAP target is
+    # added after it, below.
+    set(chimpo_juce_formats "")
+    foreach(format IN LISTS CHIMPO_FORMATS)
+        if(format MATCHES "^(AU|VST3)$")
+            list(APPEND chimpo_juce_formats ${format})
+        endif()
+    endforeach()
+
     juce_add_plugin(Chimpo
         PRODUCT_NAME "CHIMPO"
         COMPANY_NAME "CHIMPO"
@@ -159,7 +179,7 @@ if(CHIMPO_BUILD_PLUGIN)
         # Never change: hosts find the plugin in saved projects by these codes.
         PLUGIN_MANUFACTURER_CODE Cdaw
         PLUGIN_CODE Tap2
-        FORMATS ${CHIMPO_FORMATS}
+        FORMATS ${chimpo_juce_formats}
         IS_SYNTH TRUE
         NEEDS_MIDI_INPUT TRUE
         NEEDS_MIDI_OUTPUT TRUE
@@ -193,10 +213,20 @@ if(CHIMPO_BUILD_PLUGIN)
             $<$<NOT:$<BOOL:${MSVC}>>:juce::juce_recommended_lto_flags>
             juce::juce_recommended_warning_flags)
 
+    if("CLAP" IN_LIST CHIMPO_FORMATS)
+        # Chimpo_CLAP: CHIMPO.clap beside the VST3 and AU. Its ID never changes:
+        # hosts save it in projects. Instrument features keep CLAP hosts from
+        # offering it as an effect.
+        clap_juce_extensions_plugin(TARGET Chimpo
+            CLAP_ID "engineering.bellcast.chimpo"
+            CLAP_FEATURES instrument sampler)
+    endif()
+
     # Each bundle carries the factory cards, Contents/Resources/Factory
     # Cards/<FIRMWARE>, where factoryCardFolder() finds them: a plugin copied
     # anywhere is complete. They go in before macOS signs the bundle and JUCE
-    # installs it, hence no COPY_PLUGIN_AFTER_BUILD above.
+    # installs it, hence no COPY_PLUGIN_AFTER_BUILD above. A CLAP on Windows and
+    # Linux is a single file, so its cards sit in <name>.resources beside it.
     get_property(firmwares GLOBAL PROPERTY CHOMPI_FIRMWARES)
     file(GLOB_RECURSE card_files CONFIGURE_DEPENDS "${CHIMPO_CARDS}/*.wav" "${CHIMPO_CARDS}/*.json")
     foreach(format IN LISTS CHIMPO_FORMATS)
@@ -204,11 +234,16 @@ if(CHIMPO_BUILD_PLUGIN)
         if(NOT TARGET ${target}) # JUCE skips formats the OS lacks
             continue()
         endif()
+        if(format STREQUAL "CLAP" AND NOT APPLE)
+            set(cards_base "$<TARGET_FILE_DIR:${target}>/$<TARGET_FILE_NAME:${target}>.resources")
+        else()
+            set(cards_base "$<TARGET_FILE_DIR:${target}>/../Resources")
+        endif()
         # A changed card relinks, so copies again (Makefile and Ninja generators).
         set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${card_files})
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} "-DCARDS=${CHIMPO_CARDS}" "-DFIRMWARES=${firmwares}"
-                    "-DDEST=$<TARGET_FILE_DIR:${target}>/../Resources/Factory Cards"
+                    "-DDEST=${cards_base}/Factory Cards"
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyFactoryCards.cmake
             VERBATIM)
         if(APPLE)
@@ -220,6 +255,27 @@ if(CHIMPO_BUILD_PLUGIN)
     endforeach()
     if(CHIMPO_INSTALL_PLUGINS)
         juce_enable_copy_plugin_step(Chimpo)
+        # JUCE's copy step knows its own formats only.
+        if(TARGET Chimpo_CLAP)
+            if(APPLE)
+                set(chimpo_clap_dir "$ENV{HOME}/Library/Audio/Plug-Ins/CLAP")
+                add_custom_command(TARGET Chimpo_CLAP POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${chimpo_clap_dir}"
+                    COMMAND ${CMAKE_COMMAND} -E rm -rf "${chimpo_clap_dir}/CHIMPO.clap"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            $<TARGET_BUNDLE_DIR:Chimpo_CLAP> "${chimpo_clap_dir}/CHIMPO.clap")
+            elseif(UNIX)
+                set(chimpo_clap_dir "$ENV{HOME}/.clap")
+                add_custom_command(TARGET Chimpo_CLAP POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${chimpo_clap_dir}"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            $<TARGET_FILE:Chimpo_CLAP> "${chimpo_clap_dir}/CHIMPO.clap"
+                    COMMAND ${CMAKE_COMMAND} -E rm -rf "${chimpo_clap_dir}/CHIMPO.clap.resources"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            "$<TARGET_FILE_DIR:Chimpo_CLAP>/$<TARGET_FILE_NAME:Chimpo_CLAP>.resources"
+                            "${chimpo_clap_dir}/CHIMPO.clap.resources")
+            endif()
+        endif()
     endif()
 
     if(CHIMPO_BUILD_HARNESS)

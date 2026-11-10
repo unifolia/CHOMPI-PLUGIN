@@ -2,7 +2,7 @@
 # Builds the CHIMPO plugin and installs it for the current user.
 #
 #   ./build.sh                     asks which formats to build
-#   ./build.sh au vst3             builds those without asking
+#   ./build.sh au vst3 clap        builds those without asking
 #   ./build.sh au --universal      also for Intel Macs / DAWs under Rosetta
 #
 # BUILD_DIR (default build-release) picks the build folder.
@@ -33,6 +33,7 @@ for arg in "$@"; do
     case "$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')" in
         au | component) formats="$formats;AU" ;;
         vst3 | vst) formats="$formats;VST3" ;;
+        clap) formats="$formats;CLAP" ;;
         --universal) universal=1 ;;
         -h | --help) usage; exit 0 ;;
         *) usage; fail "Unknown option: $arg" ;;
@@ -84,19 +85,21 @@ if [ -z "$formats" ]; then
     info "Which versions of the plugin do you want?"
     info "  1) AU           for Logic Pro, GarageBand and MainStage (most other Mac DAWs load it too)"
     info "  2) VST3         for Ableton Live, Bitwig, Cubase, Reaper, Studio One, FL Studio"
+    info "  3) CLAP         for Bitwig Studio and Reaper"
     while [ -z "$formats" ]; do
-        read -r -p "Type the numbers (e.g. 1), or press Return for both: " picks || picks=
-        [ -n "$picks" ] || picks="1 2"
+        read -r -p "Type the numbers (e.g. 1), or press Return for all three: " picks || picks=
+        [ -n "$picks" ] || picks="1 2 3"
         bad=
         for pick in $(printf '%s' "$picks" | tr ',' ' '); do
             case "$pick" in
                 1) formats="$formats;AU" ;;
                 2) formats="$formats;VST3" ;;
+                3) formats="$formats;CLAP" ;;
                 *) bad=1 ;;
             esac
         done
         if [ -n "$bad" ]; then
-            info "Please use only 1 and 2."
+            info "Please use only 1, 2 and 3."
             formats=
         fi
     done
@@ -159,6 +162,9 @@ case ";$formats;" in *";AU;"*)
 esac
 case ";$formats;" in *";VST3;"*)
     info "  VST3        ~/Library/Audio/Plug-Ins/VST3/CHIMPO.vst3" ;;
+esac
+case ";$formats;" in *";CLAP;"*)
+    info "  CLAP        ~/Library/Audio/Plug-Ins/CLAP/CHIMPO.clap" ;;
 esac
 info "  The factory SD cards are inside the plugin."
 

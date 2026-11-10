@@ -1,10 +1,12 @@
 # Validation
 
 What checks a build before it ships, and what still needs a host. CI runs all
-of it on macOS, Windows and Linux (`.github/workflows/build.yml`); a `v*` tag
-also validates the universal macOS build's x86_64 half on an Intel runner.
+of it on a pull request or a `v*` tag — never on a merge to main, by the
+Bellcast pattern Marcasite set (`docs/RELEASE.md`); branch protection requires
+the PR's checks with the branch up to date. A tag also validates the universal
+macOS build's x86_64 half on an Intel runner.
 
-## Automatic, every push and pull request
+## Automatic, every pull request and tag
 
 | Check | What it proves | Where |
 |---|---|---|
@@ -12,9 +14,12 @@ also validates the universal macOS build's x86_64 half on an Intel runner.
 | `chompi_hostcheck` | the built VST3 loads and plays each firmware with the source `cards/` moved aside | `tools/chompi_hostcheck.cpp` |
 | Steinberg VST3 `validator` | 500+ SDK conformance tests on the VST3 bundle | `scripts/validate_formats.py` |
 | pluginval, strictness 10, no GUI tests | host-contract behaviour: parameters, state, buses, fuzzing | `scripts/validate_formats.py` |
+| clap-validator | CLAP conformance on the CLAP bundle (`engineering.bellcast.chimpo`) | `scripts/validate_formats.py` |
 | `auval -strict` ×3 with `-stress 600`, `-oop`, `-real-time-safety` | Apple's AU conformance, out-of-process load, blocking calls on the render thread | `scripts/validate_au.py` |
 | pluginval on the AU | the same host-contract behaviour for the AU | `scripts/validate_au.py` |
-| CLAP validator | only once CHIMPO ships a CLAP build; the script picks it up automatically | `scripts/validate_formats.py` |
+| `scripts/third_party.py` | every vendored licence and JUCE's AGPLv3 text is present, and the texts are collected for the installers | `scripts/third_party.py` |
+| installer build + install test | each OS's installer installs what it says, byte-identically, byte-identical to the validated build, and removes cleanly | `scripts/test_*_install.*` |
+| performance matrix (manual) | each firmware's real-time factor on an idle machine | `scripts/performance_matrix.py`, [PERFORMANCE.md](PERFORMANCE.md) |
 
 Tools are pinned: the VST3 SDK by commit, pluginval and clap-validator by
 version and SHA-256. A failure fails the job unless `EXCEPTIONS` in
@@ -28,8 +33,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCHIMPO_INSTALL_PLUGINS=OFF -DCH
 cmake --build build --config Release --parallel 8
 ctest --test-dir build -C Release --output-on-failure
 
-python3 scripts/validate_formats.py
+python3 scripts/validate_formats.py       # VST3, CLAP and pluginval
 python3 scripts/validate_au.py            # macOS; restores any installed CHIMPO AU afterwards
+
+python3 scripts/third_party.py            # licences, into target/notices
+CHIMPO_UNSIGNED=1 bash scripts/package_macos.sh   # or package_windows.sh / package_linux.sh
 ```
 
 `target/validators/` holds the tools and logs (ignored by git). A local AU run
@@ -52,8 +60,9 @@ warnings, and they stay open until fixed or accepted.
 |---|---|---|
 | `ausdk::AUMethodRender` | Apple's AudioUnitSDK locks a `recursive_mutex` in `AUBase::DoRender` on every render. Every AU built on it does this | Apple's SDK; same finding as Marcasite |
 | `JuceAU::Render` | JUCE's AUv2 wrapper takes `incomingMidiLock` around MIDI delivery | JUCE, upstream |
-| `emu::VirtualCard::{Exists,IsDir,OpenFile,Read}`, `ChompiProcessor::renderBlock` | **fixed in this PR**: the card used a `std::mutex` per file operation on the render thread; it now uses `emu::SpinLock`, and the flusher waits on its own `std::mutex`. Its exceptions are gone, so a reappearance fails CI | was ours |
+| `emu::VirtualCard::{Exists,IsDir,OpenFile,Read}`, `ChompiProcessor::renderBlock` | **fixed in PR #7**: the card used a `std::mutex` per file operation on the render thread; it now uses `emu::SpinLock`, and the flusher waits on its own `std::mutex`. Its exceptions are gone, so a reappearance fails CI | was ours |
 | `ChompiProcessor::processBlock` | a `free` on the render thread. Not reproduced in `tests/plugin_test.cpp` (its counter hooks `operator new/delete`; a `free` interposer on the same path saw none), so it follows host-side parameter traffic | ours; to be located |
+| clap-validator `state-invalid-random` | the CLAP reports a corrupt state as loaded: `juce::AudioProcessor::setStateInformation` returns void, so clap-juce-extensions cannot tell the host it refused it. CHIMPO ignores the bytes and keeps running | clap-juce-extensions, upstream |
 | `daisy_tape::{Engine::UpdateFileExists,FileCopier::NeedsOverwrite}` | the released CHOMPI firmware calls `sprintf` on the audio thread, and libc's `printf` frees internally | CHOMPI's firmware, which stays as released |
 
 Shipping with any of these open needs the owner's agreement: the first two

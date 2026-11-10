@@ -1,25 +1,51 @@
 name: Build
 
-# Every push to main and every pull request builds and checks CHIMPO on macOS,
-# Windows and Linux. A v* tag, which must match project(VERSION) in
-# CMakeLists.txt, also drafts a GitHub release with the packages.
+# The triggering pattern is Bellcast Engineering's, from Marcasite: CI runs on
+# a pull request or a v* tag, never on a merge to main. Branch protection
+# requires the PR's checks with the branch up to date, so a merge lands exactly
+# what CI tested and main runs nothing again. A v* tag (which must match
+# project(VERSION) in CMakeLists.txt) runs every platform, validates the
+# universal macOS build on Intel too, signs Windows when the signing secrets
+# are configured, and drafts a GitHub release with the installers.
 on:
   push:
-    branches: [main]
     tags: ['v*']
   pull_request:
+    # Drafts run nothing; marking one ready for review runs CI.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms (macOS minutes cost ~10x Linux): pr = what a PR runs; all adds the Intel Mac, as a tag does"
+        type: choice
+        default: pr
+        options: [pr, all, macos-arm64, windows-linux]
+      skip_tests:
+        description: Skip ctest, the host check and the validators, to iterate on packaging
+        type: boolean
+        default: false
+      sign_windows:
+        description: Sign the Windows build with Artifact Signing (tags, or a dispatch on an allowed branch)
+        type: boolean
+        default: false
 
-permissions:
-  contents: read
-
+# A newer push to a pull request supersedes its running checks; tag and manual
+# runs are never cancelled. Merges to main run nothing.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: build-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: ${{ matrix.name }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ${{ matrix.os }}
+    # Only a signing Windows job enters the `signing` environment, whose branch
+    # and tag rules and Azure federated credential gate the certificate.
+    environment: ${{ ((inputs.sign_windows || github.ref_type == 'tag') && matrix.os == 'windows-2025') && 'signing' || '' }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -35,10 +61,14 @@ jobs:
             # The oldest glibc the package then needs: 2.35.
             os: ubuntu-22.04
             configure: ""
-    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
+    env:
+      # Signing needs the Azure secrets; without them a tag ships an unsigned
+      # Windows installer and the run says so, rather than failing the release.
+      CHIMPO_SIGN: ${{ ((inputs.sign_windows || github.ref_type == 'tag') && matrix.os == 'windows-2025' && secrets.AZURE_CLIENT_ID != '') && '1' || '0' }}
+      SIGNED: ${{ ((inputs.sign_windows || github.ref_type == 'tag') && matrix.os == 'windows-2025' && secrets.AZURE_CLIENT_ID != '') && 'signed' || 'unsigned' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -65,10 +95,12 @@ jobs:
         run: cmake --build build --config Release --parallel 4
 
       - name: Test
+        if: ${{ !inputs.skip_tests }}
         run: ctest --test-dir build -C Release --output-on-failure --timeout 300
 
       # With cards/ out of the way, the plugin can only use its bundle's copy.
       - name: Load the plugin as a host would
+        if: ${{ !inputs.skip_tests }}
         run: |
           root=$(pwd -W 2>/dev/null || pwd) # a Windows path for the plugin on Windows
           for check in build/chompi_hostcheck_artefacts/Release/chompi_hostcheck{,.exe}; do [[ -f $check ]] && break; done
@@ -79,81 +111,116 @@ jobs:
             artefacts=build/Chimpo_artefacts/Release
             diff -rq "$artefacts/VST3/CHIMPO.vst3/Contents/Resources/Factory Cards" \
               "$artefacts/AU/CHIMPO.component/Contents/Resources/Factory Cards"
-            mkdir -p ~/Library/Audio/Plug-Ins/Components
-            cp -R "$artefacts/AU/CHIMPO.component" ~/Library/Audio/Plug-Ins/Components/
-            killall -9 AudioComponentRegistrar || true
-            auval -v aumu Tap2 Cdaw
+            # The AU's own load is validate_au.py's job; installing it here would
+            # leave a second CHIMPO AU registered for the install test to find.
           fi
           mv build/cards-moved cards
 
-      # The validators run on the bundles that ship. Steinberg's VST3
-      # validator comes from a pinned SDK; pluginval is pinned and
-      # SHA-256-checked. CHIMPO is an instrument, so no bypass parameter.
+      # Steinberg's VST3 validator (from a pinned SDK), pluginval on the VST3,
+      # clap-validator on the CLAP; auval strict and pluginval on the AU.
       - name: Cache the VST3 SDK
         uses: actions/cache@v4
         with:
           path: target/validators/vst3sdk
           key: vst3-sdk-${{ runner.os }}-${{ runner.arch }}-9fad9770f2ae
 
-      - name: Validate VST3 (and CLAP when it exists)
+      - name: Validate VST3 and CLAP
+        if: ${{ !inputs.skip_tests }}
         run: python3 scripts/validate_formats.py
 
       # auval strict: three passes with its stress test, out of process, and
-      # its dtrace real-time-safety test; plus pluginval on the AU.
+      # its dtrace real-time-safety test.
       - name: Validate Audio Unit
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && !inputs.skip_tests
         run: python3 scripts/validate_au.py
+
+      # The licence gate: every vendored component and JUCE's AGPLv3 text must
+      # be present, and the texts are collected for the installers.
+      - name: Collect third-party notices
+        run: python3 scripts/third_party.py
+
+      - name: Install Inno Setup if the image lacks it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Azure login for signing
+        if: env.CHIMPO_SIGN == '1'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # The installer's script, layout and choices, unsigned, so its bundles
+      # are byte-identical to the ones the validators ran on; it installs
+      # system-wide, checks itself with auval, then removes everything.
+      - name: Package and test macOS installer
+        if: runner.os == 'macOS'
+        run: |
+          CHIMPO_UNSIGNED=1 bash scripts/package_macos.sh
+          python3 scripts/test_macos_install.py
+
+      - name: Sign and package Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          if [ "$CHIMPO_SIGN" = 1 ]; then
+            pwsh -NoProfile -File scripts/sign_windows.ps1 \
+              build/Chimpo_artefacts/Release/CLAP/CHIMPO.clap \
+              build/Chimpo_artefacts/Release/VST3/CHIMPO.vst3/Contents/x86_64-win/CHIMPO.vst3
+          fi
+          bash scripts/package_windows.sh
+          pwsh -NoProfile -File scripts/test_windows_install.ps1
+
+      - name: Package and test Linux archive
+        if: runner.os == 'Linux'
+        run: |
+          bash scripts/package_linux.sh
+          bash scripts/test_linux_install.sh
 
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: validator-logs-${{ matrix.name }}
+          name: logs-${{ matrix.name }}
           path: |
             target/validators/*.log
             target/validators/*.json
             target/validators/*-logs
+            dist/install.log
+            target/pkg/expanded/**/Distribution
           if-no-files-found: ignore
 
-      - name: Package
-        run: |
-          version=$(sed -n 's/^project(CHIMPO VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            if [[ ${GITHUB_REF_NAME#v} != "$version" ]]; then
-              echo "::error::Tag $GITHUB_REF_NAME doesn't match project(VERSION $version) in CMakeLists.txt"
-              exit 1
-            fi
-          else
-            version="$version-${GITHUB_SHA::7}"
-          fi
-          mkdir -p dist
-          package() { # package <format> <bundle>
-            local name="CHIMPO-$version-${{ matrix.name }}-$1" stage=build/package
-            rm -rf "$stage" && mkdir -p "$stage/$name"
-            cp -R "$2" LICENSE THIRD_PARTY.md TRADEMARKS.md "$stage/$name/"
-            case $RUNNER_OS in
-              macOS) ditto -c -k --norsrc --noextattr --noacl --keepParent "$stage/$name" "dist/$name.zip" ;;
-              Windows) (cd "$stage" && cmake -E tar cf "../../dist/$name.zip" --format=zip "$name") ;;
-              Linux) tar -C "$stage" -czf "dist/$name.tar.gz" "$name" ;;
-            esac
-          }
-          artefacts=build/Chimpo_artefacts/Release
-          if [[ $RUNNER_OS == macOS ]]; then package AU "$artefacts/AU/CHIMPO.component"; fi
-          package VST3 "$artefacts/VST3/CHIMPO.vst3"
-          ls -l dist
-
+      # Packages only: the release job takes what a buyer downloads.
       - uses: actions/upload-artifact@v7
+        if: runner.os != 'macOS'
         with:
-          name: CHIMPO-${{ matrix.name }}
-          path: dist/
+          name: CHIMPO-${{ matrix.name }}-${{ env.SIGNED }}
+          path: |
+            dist/*.exe
+            dist/*.tar.gz
+          if-no-files-found: error
           retention-days: 14
 
-      # The universal bundles exactly as validated above, for the Intel job
-      # to check their x86_64 half. A tarball: artifacts drop executable bits.
+      # The unsigned macOS package, for a look; the release's is built,
+      # signed and notarized locally from the tag run's universal bundle.
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'macOS'
+        with:
+          name: chimpo-macos-pkg
+          path: dist/*.pkg
+          if-no-files-found: error
+          retention-days: 14
+
+      # The universal bundles exactly as validated above, for the Intel job.
+      # A tarball: artifacts drop executable bits.
       - name: Pack the universal macOS bundles
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
-        run: >-
-          tar -czf chimpo-macos-universal.tar.gz -C build/Chimpo_artefacts/Release
-          VST3/CHIMPO.vst3 AU/CHIMPO.component
+        run: |
+          tar -czf chimpo-macos-universal.tar.gz -C build/Chimpo_artefacts/Release \
+            VST3/CHIMPO.vst3 AU/CHIMPO.component CLAP/CHIMPO.clap
 
       - uses: actions/upload-artifact@v7
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
@@ -188,7 +255,7 @@ jobs:
           path: target/validators/vst3sdk
           key: vst3-sdk-${{ runner.os }}-${{ runner.arch }}-9fad9770f2ae
 
-      - name: Validate VST3
+      - name: Validate VST3 and CLAP
         run: python3 scripts/validate_formats.py
 
       - name: Validate Audio Unit
@@ -197,26 +264,35 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: validator-logs-macos-universal-intel
+          name: logs-macos-universal-intel
           path: |
             target/validators/*.log
             target/validators/*.json
             target/validators/*-logs
           if-no-files-found: ignore
 
+  # Tag runs only. Attaches the Windows installer and the Linux archive, each
+  # with a .sha256 file, to a draft release; the macOS .pkg is built, signed
+  # and notarized locally from the tag run's universal bundle and uploaded to
+  # the same draft. Publishing stays a manual step.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, macos-universal-intel]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-          # The packages only: the lower-case artifact is the raw universal
-          # bundle for the Intel validation job, not something to ship.
+          # The packages only: the lower-case artifacts are the macOS package
+          # and the raw universal bundle, not what the release ships.
           pattern: CHIMPO-*
 
       - name: Write SHA-256 checksums
@@ -227,25 +303,25 @@ jobs:
           done
           cat ./*.sha256
 
-      # A draft: check the packages and notes, then publish it on GitHub.
+      # A draft: check the packages and notes, add the macOS package, then
+      # publish it on GitHub.
       - name: Draft the release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           cat > notes.md <<'EOF'
-          Unzip the package for your system, move the plugin into your plug-in folder, then rescan plug-ins in your DAW.
-
-          SHA-256 checksums are attached for every package (`shasum -a 256 -c <file>.sha256`).
+          CHIMPO is free software: the firmware and code are MIT-licensed, and the
+          plug-ins link JUCE under the AGPLv3. The complete corresponding source for
+          these builds is on this tag. Licences are installed with the plug-ins; the
+          notice is also in NOTICE.txt.
 
           | | |
           |---|---|
-          | macOS 11+, Apple Silicon and Intel | `CHIMPO.component` to `~/Library/Audio/Plug-Ins/Components` (Logic, GarageBand), `CHIMPO.vst3` to `~/Library/Audio/Plug-Ins/VST3` |
-          | Windows 10+, x64 | `CHIMPO.vst3` to `C:\Program Files\Common Files\VST3` |
-          | Linux x64, glibc 2.35+ (Ubuntu 22.04+) | `CHIMPO.vst3` to `~/.vst3` |
+          | macOS 11+, Apple Silicon and Intel | `CHIMPO-<version>-macOS.pkg` installs the AU, VST3 and CLAP into `/Library/Audio/Plug-Ins` |
+          | Windows 10+, x64 | `CHIMPO-<version>-Windows-Setup.exe` installs the VST3 and CLAP into `Common Files` |
+          | Linux x64, glibc 2.35+ (Ubuntu 22.04+) | `CHIMPO-<version>-Linux-x86_64.tar.gz`, then `./install.sh` |
 
-          **macOS:** these builds aren't notarized, so macOS won't load them until you clear the download flag in Terminal, e.g. `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/CHIMPO.component`. Building from source with `./build.sh` avoids this.
-
-          The factory SD cards are inside the plugin. Each firmware copies its card to `Music/CHIMPO` the first time it runs.
+          SHA-256 checksums are attached for every package (`shasum -a 256 -c <file>.sha256`).
+          The macOS package is built and notarized locally from this tag's validated
+          universal build and added to this draft.
           EOF
           echo "The plugins link JUCE 9 under the AGPLv3; their source is https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME." >> notes.md
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \

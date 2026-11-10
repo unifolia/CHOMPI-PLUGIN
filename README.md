@@ -9,11 +9,13 @@ Club or Chase Bliss. I mean, the names are so different. CHOMPI is a trademark o
 ## Download
 
 Ready-built plugins are on the
-[Releases](https://github.com/unifolia/CHOMPI-DAW/releases) page, with install
-steps: AU and VST3 for macOS 11+ (Apple Silicon and Intel), VST3 for Windows
-and Linux (x64). The factory SD cards are inside the plugin. The macOS builds
-aren't notarized, so they need one Terminal command before they load; building
-from source avoids it. See next section.
+[Releases](https://github.com/unifolia/CHIMPO-PLUGIN/releases) page, with
+installers for each system: a `.pkg` for macOS 11+ (Apple Silicon and Intel,
+AU, VST3 and CLAP), a setup `.exe` for Windows 10+ (VST3 and CLAP), and a
+`.tar.gz` with `install.sh` for Linux x64 (VST3 and CLAP). The factory SD cards
+are inside the plugin. CHIMPO is free software: MIT for the firmware and code,
+with JUCE linked under the AGPLv3 (see [License](#license)); the installer
+shows the notice.
 
 ## Build
 
@@ -60,20 +62,26 @@ which installs it in `~/.vst3`.
 
 The CMake build installs the plugins in the user's plug-in folders, except on
 Windows (`-DCHIMPO_INSTALL_PLUGINS=ON|OFF` decides). Each bundle carries the
-factory cards in `Contents/Resources/Factory Cards`. `-DCHIMPO_FORMATS=AU`
-picks formats. Builds are native-arch; add
+factory cards in `Contents/Resources/Factory Cards` (a CLAP on Windows and
+Linux is a single file, with the cards in `CHIMPO.clap.resources` beside it).
+`-DCHIMPO_FORMATS="AU;VST3;CLAP"` picks formats; JUCE builds the AU and VST3,
+and `clap-juce-extensions` (pinned, fetched at configure time) wraps the same
+processor for the CLAP. Builds are native-arch; add
 `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` for hosts running under Rosetta.
 `-DFETCHCONTENT_SOURCE_DIR_JUCE=<path>` uses a local JUCE checkout.
 `-DCHIMPO_BUILD_TESTS=ON` builds the tests; `ctest` in the build folder runs
 them (`tests/CMakeLists.txt`).
 
-Every push and pull request is built and checked on all three systems
-(`.github/workflows/build.yml`), including the format validators: Steinberg's
-VST3 validator, pluginval at strictness 10, and `auval -strict` on the AU.
-[`docs/VALIDATION.md`](docs/VALIDATION.md) says what runs, how to run it
-locally, and what still needs a real host. Pushing a tag `v<version>`, matching
-`project(VERSION)` in `CMakeLists.txt`, also drafts a release with the
-packages, to check and publish on GitHub.
+CI runs on a pull request or a `v*` tag, never on a merge to main (the
+Bellcast pattern), and builds and checks all three systems
+(`.github/workflows/build.yml`): the format validators (Steinberg's VST3
+validator, pluginval, clap-validator, `auval -strict`), the third-party notice
+gate, and each OS's installer with an install test.
+[`docs/VALIDATION.md`](docs/VALIDATION.md) says what runs and how to run it
+locally; [`docs/INSTALLERS.md`](docs/INSTALLERS.md) and
+[`docs/RELEASE.md`](docs/RELEASE.md) cover packaging and releases. Pushing a tag
+`v<version>`, matching `project(VERSION)` in `CMakeLists.txt`, also drafts a
+release with the packages, to check and publish on GitHub.
 
 ## Map
 
@@ -86,9 +94,12 @@ packages, to check and publish on GitHub.
 | `cards/<tape, wave, tempo>` | factory SD cards |
 | `build.sh` | guided build and install for non-developers |
 | `cmake/` | build scripts: no two firmwares define the same name; the factory cards into each bundle |
-| `.github/workflows/build.yml` | CI on macOS, Windows and Linux; validators; packages and draft releases |
-| `scripts/` | format and AU validators, the release-tag check |
+| `.github/workflows/build.yml` | CI on pull requests and tags; validators; installer tests; draft releases |
+| `scripts/` | validators, licence and notice gate, installers and their tests, performance matrix |
 | `docs/VALIDATION.md` | what is checked automatically, and what needs a host |
+| `docs/INSTALLERS.md` | the three installers, what they install, signing |
+| `docs/RELEASE.md` | tag, validated build, signed macOS package, draft release |
+| `docs/PERFORMANCE.md` | how to measure each firmware's cost, and the baseline |
 | `tests/` | DSP unit tests, firmware renders against references, the plugin as a host drives it |
 | `tools/chompi_render` | headless: script the panel/MIDI/clock, render a WAV (`--firmware`) |
 | `tools/chompi_harness` | `-DCHIMPO_BUILD_HARNESS=ON`: offscreen UI snapshots, state and host-rate tests |
