@@ -12,3 +12,7 @@ CLAUDE.MD
 # Build output
 /build*/
 
+# Validator tools and CMake build (scripts/validate_formats.py)
+/target/
+__pycache__/
+

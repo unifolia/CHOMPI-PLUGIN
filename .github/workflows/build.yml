@@ -42,12 +42,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Fail a mistyped tag at once rather than after a full build.
+      - name: Check the tag matches the project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: bash scripts/check_release_tag.sh "$GITHUB_REF_NAME"
+
       - name: Install JUCE's Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
-            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libxi-dev
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libxi-dev \
+            libgl-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
 
       - name: Configure
         run: >
@@ -78,6 +85,34 @@ jobs:
             auval -v aumu Tap2 Cdaw
           fi
           mv build/cards-moved cards
+
+      # The validators run on the bundles that ship. Steinberg's VST3
+      # validator comes from a pinned SDK; pluginval is pinned and
+      # SHA-256-checked. CHIMPO is an instrument, so no bypass parameter.
+      - name: Cache the VST3 SDK
+        uses: actions/cache@v4
+        with:
+          path: target/validators/vst3sdk
+          key: vst3-sdk-${{ runner.os }}-${{ runner.arch }}-9fad9770f2ae
+
+      - name: Validate VST3 (and CLAP when it exists)
+        run: python3 scripts/validate_formats.py
+
+      # auval strict: three passes with its stress test, out of process, and
+      # its dtrace real-time-safety test; plus pluginval on the AU.
+      - name: Validate Audio Unit
+        if: runner.os == 'macOS'
+        run: python3 scripts/validate_au.py
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: validator-logs-${{ matrix.name }}
+          path: |
+            target/validators/*.log
+            target/validators/*.json
+            target/validators/*-logs
+          if-no-files-found: ignore
 
       - name: Package
         run: |
@@ -112,9 +147,66 @@ jobs:
           path: dist/
           retention-days: 14
 
-  release:
+      # The universal bundles exactly as validated above, for the Intel job
+      # to check their x86_64 half. A tarball: artifacts drop executable bits.
+      - name: Pack the universal macOS bundles
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        run: >-
+          tar -czf chimpo-macos-universal.tar.gz -C build/Chimpo_artefacts/Release
+          VST3/CHIMPO.vst3 AU/CHIMPO.component
+
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: chimpo-macos-universal
+          path: chimpo-macos-universal.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # The universal macOS build ships as made on macos-15, which validated its
+  # arm64 half. This validates the same files' x86_64 half on Intel.
+  macos-universal-intel:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: chimpo-macos-universal
+
+      - name: Unpack the universal build
+        run: |
+          mkdir -p build/Chimpo_artefacts/Release
+          tar -xzf chimpo-macos-universal.tar.gz -C build/Chimpo_artefacts/Release
+          lipo -archs build/Chimpo_artefacts/Release/VST3/CHIMPO.vst3/Contents/MacOS/CHIMPO
+
+      - name: Cache the VST3 SDK
+        uses: actions/cache@v4
+        with:
+          path: target/validators/vst3sdk
+          key: vst3-sdk-${{ runner.os }}-${{ runner.arch }}-9fad9770f2ae
+
+      - name: Validate VST3
+        run: python3 scripts/validate_formats.py
+
+      - name: Validate Audio Unit
+        run: python3 scripts/validate_au.py
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: validator-logs-macos-universal-intel
+          path: |
+            target/validators/*.log
+            target/validators/*.json
+            target/validators/*-logs
+          if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, macos-universal-intel]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -123,6 +215,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # The packages only: the lower-case artifact is the raw universal
+          # bundle for the Intel validation job, not something to ship.
+          pattern: CHIMPO-*
+
+      - name: Write SHA-256 checksums
+        run: |
+          cd dist
+          for f in *; do
+            [ "${f##*.}" = sha256 ] || sha256sum "$f" > "$f.sha256"
+          done
+          cat ./*.sha256
 
       # A draft: check the packages and notes, then publish it on GitHub.
       - name: Draft the release
@@ -131,6 +234,8 @@ jobs:
         run: |
           cat > notes.md <<'EOF'
           Unzip the package for your system, move the plugin into your plug-in folder, then rescan plug-ins in your DAW.
+
+          SHA-256 checksums are attached for every package (`shasum -a 256 -c <file>.sha256`).
 
           | | |
           |---|---|
