@@ -166,6 +166,7 @@ class ChompiProcessor : public juce::AudioProcessor,
         std::atomic<bool>          hostChanged{false}; // until a machine on that firmware takes it
         std::atomic<uint32_t>      hostSerial{0};      // host changes so far
         std::atomic<float>         unitValue{0};
+        std::atomic<bool>          unitKnown{false}; // unitValue was read from a machine
         std::atomic<bool>          unitChanged{false};
         std::atomic<uint32_t>      unitSerial{0}; // hostSerial when unitValue was read
         bool                       gesture    = false; // message thread

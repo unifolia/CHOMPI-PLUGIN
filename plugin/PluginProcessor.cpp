@@ -264,6 +264,7 @@ void ChompiProcessor::readControls(emu::Machine& machine)
            && machine.ReadControl(control->index, value))
         {
             control->unitValue.store(value, std::memory_order_relaxed);
+            control->unitKnown.store(true, std::memory_order_relaxed);
             control->unitSerial.store(serial, std::memory_order_relaxed);
             control->unitChanged.store(true, std::memory_order_release);
         }
@@ -1008,9 +1009,15 @@ void ChompiProcessor::getStateInformation(juce::MemoryBlock& destData)
     auto* controls = xml.createNewChildElement("Controls");
     for(const auto& control : controls_)
     {
+        // The unit's value where it has reported one: a host value still on its
+        // way to the unit must not overwrite the knob the session holds, or a
+        // recall would not reproduce the saved project byte for byte.
+        const float value = control->firmware == firmware && control->unitKnown.load(std::memory_order_relaxed)
+                                ? control->unitValue.load(std::memory_order_relaxed)
+                                : static_cast<juce::AudioProcessorParameter*>(control->param)->getValue();
         auto* child = controls->createNewChildElement("Control");
         child->setAttribute("id", control->param->getParameterID());
-        child->setAttribute("value", double(static_cast<juce::AudioProcessorParameter*>(control->param)->getValue()));
+        child->setAttribute("value", double(value));
     }
     if(haveSession)
     {
