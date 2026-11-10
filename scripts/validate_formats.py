@@ -110,6 +110,16 @@ EXCEPTIONS: list = [
             "clap-juce-extensions reports state.load success for any bytes, because "
             "juce::AudioProcessor::setStateInformation returns void; CHIMPO refuses "
             "invalid XML without crashing. To be fixed upstream"),
+    # A timing heuristic, not a functional check: it compares denormal against
+    # normal processing time. It has failed on loaded runners (3.17x on Linux,
+    # then on Windows) with the same binary passing when the job was rerun,
+    # while processBlock sets juce::ScopedNoDenormals and the VST3 validator and
+    # pluginval pass on the same build. Kept visible as a warning; a measured
+    # flush-to-zero check of our own should replace it.
+    Allowed("clap-validator", "process-audio-denormals", KNOWN_BUG,
+            "A timing heuristic that flakes on loaded CI runners (seen on Linux and "
+            "Windows, green on rerun, same binary). processBlock guards it with "
+            "juce::ScopedNoDenormals. To be replaced by a measured FTZ check"),
     # --- Real-time safety (auval-rt) -------------------------------------
     # Apple's AudioUnitSDK locks a std::recursive_mutex in AUBase::DoRender
     # (RenderCallbackList::foreach) on every render while the host has a render
