@@ -16,10 +16,10 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: "Platforms (macOS minutes cost ~10x Linux): pr = what a PR runs; all adds the Intel Mac, as a tag does"
+        description: "A manual run: all adds the Intel Mac to the tag job's set; pr runs the three platforms"
         type: choice
         default: pr
-        options: [pr, all, macos-arm64, windows-linux]
+        options: [pr, all]
       skip_tests:
         description: Skip ctest, the host check and the validators, to iterate on packaging
         type: boolean
@@ -320,9 +320,11 @@ jobs:
           | Linux x64, glibc 2.35+ (Ubuntu 22.04+) | `CHIMPO-<version>-Linux-x86_64.tar.gz`, then `./install.sh` |
 
           SHA-256 checksums are attached for every package (`shasum -a 256 -c <file>.sha256`).
-          The macOS package is built and notarized locally from this tag's validated
-          universal build and added to this draft.
+          The macOS package is signed, notarized and stapled from this tag's validated
+          universal build, and is added here before the draft is published.
           EOF
+          # The heredoc is quoted so the backticks survive: fill in the version.
+          sed -i.bak "s/<version>/${GITHUB_REF_NAME#v}/g" notes.md && rm -f notes.md.bak
           echo "The plugins link JUCE 9 under the AGPLv3; their source is https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME." >> notes.md
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "CHIMPO ${GITHUB_REF_NAME#v}" --notes-file notes.md
