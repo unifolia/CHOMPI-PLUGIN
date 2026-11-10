@@ -141,13 +141,24 @@ juce::AudioParameterFloatAttributes controlAttributes(emu::ControlInfo::Unit uni
         switch(unit)
         {
             case Unit::Pan:
-                return juce::jlimit(0.f, 1.f, .5f + (s.startsWithIgnoreCase("L") ? -n : s.startsWithIgnoreCase("R") ? n : 0.f) / 200.f);
+                // Back into the middle of the bucket the readout names: L1 is
+                // (0.4925, 0.495], and 0.495 itself reads "C" (clap-validator
+                // checks the readout survives a round trip).
+                if(s.startsWithIgnoreCase("C") || n == 0.f)
+                    return .5f;
+                return juce::jlimit(0.f, 1.f, s.startsWithIgnoreCase("L") ? .5f - (n + .25f) / 200.f
+                                                                          : .5f + (n + .25f) / 200.f);
             case Unit::SampleSpeed: return knobOf(n);
             case Unit::LooperSpeed: return juce::jlimit(0.f, 1.f, (n + 2.f) / 4.f);
             case Unit::Semitones: return juce::jlimit(0.f, 1.f, n / 24.f + .5f);
             case Unit::Frame: return juce::jlimit(0.f, 1.f, (n - 1.f) / 32.f);
             case Unit::DelayReverb:
-                return juce::jlimit(0.f, 1.f, .5f + (s.startsWithIgnoreCase("D") ? -n : s.startsWithIgnoreCase("R") ? n : 0.f) / 200.f);
+                if(s.startsWithIgnoreCase("D") && !s.startsWithIgnoreCase("Delay"))
+                    return .5f; // "Dry"
+                if(n == 0.f)
+                    return .5f;
+                return juce::jlimit(0.f, 1.f, s.startsWithIgnoreCase("D") ? .5f - (n + .25f) / 200.f
+                                                                          : .5f + (n + .25f) / 200.f);
             case Unit::Tempo: return juce::jlimit(0.f, 1.f, (n - 160.f) / 320.f);
             case Unit::Percent: break;
         }
@@ -297,16 +308,22 @@ juce::String ChompiProcessor::firmwareName(emu::Firmware firmware)
 juce::File ChompiProcessor::factoryCardFolder(emu::Firmware firmware)
 {
     // The build copies them into the plugin bundle, whose binary is
-    // Contents/<MacOS, x86_64-win, x86_64-linux>/ on every OS. The source
-    // tree's cards/ serves what runs outside a bundle (the harness).
+    // Contents/<MacOS, x86_64-win, x86_64-linux>/ on every OS. A CLAP on Windows
+    // and Linux is a single file, so its cards sit in <name>.clap.resources
+    // beside it. The source tree's cards/ serves what runs outside a bundle
+    // (the harness).
     using juce::File;
-    const auto bundled = File::getSpecialLocation(File::currentExecutableFile)
-                             .getParentDirectory()
-                             .getSiblingFile("Resources")
-                             .getChildFile("Factory Cards")
-                             .getChildFile(folderName(firmware));
+    const auto executable = File::getSpecialLocation(File::currentExecutableFile);
+    const auto cardsIn    = [firmware](const File& folder) {
+        return folder.getChildFile("Factory Cards").getChildFile(folderName(firmware));
+    };
+    const auto bundled = cardsIn(executable.getParentDirectory().getSiblingFile("Resources"));
     if(hasCardFiles(bundled))
         return bundled;
+    const auto beside = cardsIn(
+        executable.getParentDirectory().getChildFile(executable.getFileName() + ".resources"));
+    if(hasCardFiles(beside))
+        return beside;
     return File(CHIMPO_CARDS).getChildFile(juce::String(folderName(firmware)).toLowerCase());
 }
 
@@ -985,6 +1002,16 @@ void ChompiProcessor::getStateInformation(juce::MemoryBlock& destData)
     xml.setAttribute("midiOmni", getMidiOmni());
     xml.setAttribute("hostSync", getHostSync());
     xml.setAttribute("togglePlay", getTogglePlay());
+    // Host parameter values ride in the state: a CLAP host keeps no separate
+    // copy of them, so a reload has to put back what the host saved
+    // (clap-validator's state-reproducibility tests).
+    auto* controls = xml.createNewChildElement("Controls");
+    for(const auto& control : controls_)
+    {
+        auto* child = controls->createNewChildElement("Control");
+        child->setAttribute("id", control->param->getParameterID());
+        child->setAttribute("value", double(static_cast<juce::AudioProcessorParameter*>(control->param)->getValue()));
+    }
     if(haveSession)
     {
         // The firmware's own names (emu::Session); TAPE's predate this and
@@ -1072,6 +1099,27 @@ void ChompiProcessor::setStateInformation(const void* data, int sizeInBytes)
     setHostSync(xml->getBoolAttribute("hostSync", true));
     setTogglePlay(xml->getBoolAttribute("togglePlay", true));
     setEditorSize({xml->getIntAttribute("editorWidth", 0), xml->getIntAttribute("editorHeight", 0)});
+
+    // The host values saved with the state (see getStateInformation). setValue,
+    // not setValueNotifyingHost: a state load can arrive on the audio thread.
+    // The next block sends them to the unit, as a host-driven change would.
+    if(const auto* saved = xml->getChildByName("Controls"))
+        for(const auto* child : saved->getChildWithTagNameIterator("Control"))
+        {
+            const auto id = child->getStringAttribute("id");
+            const auto v  = float(child->getDoubleAttribute("value", -1.0));
+            if(v < 0.f || v > 1.f)
+                continue;
+            for(const auto& control : controls_)
+                if(control->param->getParameterID() == id)
+                {
+                    static_cast<juce::AudioProcessorParameter*>(control->param)->setValue(v);
+                    control->hostValue.store(control->param->convertFrom0to1(v), std::memory_order_relaxed);
+                    control->hostChanged.store(true, std::memory_order_release);
+                    control->hostSerial.fetch_add(1, std::memory_order_acq_rel);
+                    break;
+                }
+        }
 
     // Projects from before there were other firmwares are TAPE's.
     const auto name     = xml->getStringAttribute("firmware", "tape");

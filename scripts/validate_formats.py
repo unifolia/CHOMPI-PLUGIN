@@ -101,6 +101,15 @@ class Allowed:
 
 
 EXCEPTIONS: list = [
+    # --- CLAP --------------------------------------------------------------
+    # juce::AudioProcessor::setStateInformation returns void, so
+    # clap-juce-extensions' state.load reports success for any blob. CHIMPO
+    # ignores a state it cannot parse and keeps running, but cannot tell the
+    # host it refused it. Upstream clap-juce-extensions fix needed.
+    Allowed("clap-validator", "state-invalid-random", KNOWN_BUG,
+            "clap-juce-extensions reports state.load success for any bytes, because "
+            "juce::AudioProcessor::setStateInformation returns void; CHIMPO refuses "
+            "invalid XML without crashing. To be fixed upstream"),
     # --- Real-time safety (auval-rt) -------------------------------------
     # Apple's AudioUnitSDK locks a std::recursive_mutex in AUBase::DoRender
     # (RenderCallbackList::foreach) on every render while the host has a render
