@@ -156,18 +156,22 @@ juce::AudioParameterFloatAttributes controlAttributes(emu::ControlInfo::Unit uni
     return juce::AudioParameterFloatAttributes().withStringFromValueFunction(text).withValueFromStringFunction(value);
 }
 
+// At file scope: initialized before main, not through a guard on the first
+// render (which is __cxa_guard_release, a pthread_mutex_lock auval reports).
+const float kTapeMakeup  = juce::Decibels::decibelsToGain(18.f);
+const float kWaveMakeup  = juce::Decibels::decibelsToGain(24.f);
+const float kTempoMakeup = juce::Decibels::decibelsToGain(12.f);
+
 /** Puts a full-velocity four-note chord at the default volume near -4 dBFS
  *  peak on each factory card; raw it peaks at -22.2 (TAPE), -28.0 (WAVE) and
  *  -16.4 dBFS (TEMPO), measured with chompi_render. */
 float outputMakeup(emu::Firmware firmware)
 {
-    static const float tape = juce::Decibels::decibelsToGain(18.f), wave = juce::Decibels::decibelsToGain(24.f),
-                       tempo = juce::Decibels::decibelsToGain(12.f);
     switch(firmware)
     {
-        case emu::Firmware::Tape: return tape;
-        case emu::Firmware::Wave: return wave;
-        case emu::Firmware::Tempo: return tempo;
+        case emu::Firmware::Tape: return kTapeMakeup;
+        case emu::Firmware::Wave: return kWaveMakeup;
+        case emu::Firmware::Tempo: return kTempoMakeup;
     }
     return 1.f;
 }

@@ -113,22 +113,16 @@ EXCEPTIONS: list = [
     Allowed("auval-rt", re.escape("pthread_mutex_lock from JuceAU::Render"), KNOWN_BUG,
             "JUCE's AUv2 wrapper locks incomingMidiLock in JuceAU::Render around MIDI "
             "delivery. Every JUCE AU does this; an upstream JUCE fix is needed"),
-    # The emulated SD card keeps a std::mutex over every file operation, and the
-    # firmware reads the card from the render thread. A background mirror holds
-    # the same mutex while it copies a new card. Ours to fix: the card views
-    # need to become lock-free (or double-buffered) on the read path.
-    Allowed("auval-rt", re.escape("pthread_mutex_lock from emu::VirtualCard::")
-            + r"(Exists|IsDir|OpenFile|Read)", KNOWN_BUG,
-            "emu::VirtualCard locks a std::mutex around each file operation and the "
-            "firmware reads the card on the render thread; the card-mirroring thread "
-            "holds the same lock. Needs a lock-free read path. Ours to fix"),
-    Allowed("auval-rt", re.escape("pthread_mutex_lock from ChompiProcessor::renderBlock"), KNOWN_BUG,
-            "The VirtualCard mutex above, inlined into renderBlock. Ours to fix"),
+    # The emulated SD card used to keep a std::mutex over every file operation;
+    # it now uses a spinlock (emu::SpinLock) with the flusher waiting on its own
+    # std::mutex, so the firmware's thread takes no pthread mutex. Removing that
+    # lock's exceptions is what proves it: if auval-rt reports VirtualCard or
+    # renderBlock again, CI fails.
     Allowed("auval-rt", re.escape("free from ChompiProcessor::processBlock"), KNOWN_BUG,
-            "A free on the render thread inside processBlock, not seen by "
-            "tests/plugin_test.cpp because its allocation counter hooks operator "
-            "new/delete and this path reaches malloc/free directly. To be located "
-            "and removed"),
+            "A free on the render thread inside processBlock. Not reproduced by "
+            "tests/plugin_test.cpp (its allocation counter hooks operator "
+            "new/delete; a free interposer on the same path saw none either), so "
+            "it is tied to host-side parameter traffic. To be located and removed"),
     # CHOMPI's released firmware calls sprintf on the audio thread (its SD-card
     # file bookkeeping), and libc's printf frees internally. The firmware stays
     # as released (CLAUDE.MD invariant), so this cannot be fixed in this repo.

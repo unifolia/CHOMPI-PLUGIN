@@ -8,6 +8,7 @@
 // are shared per folder, like one card in one slot; machines on the same
 // folder see each other's writes.
 #pragma once
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -21,6 +22,46 @@
 
 namespace emu
 {
+/** The card's own lock, which the firmware's thread takes on every file
+ *  operation: no syscall, unlike std::mutex, whose pthread_mutex_lock auval's
+ *  real-time check reports as a blocking call. Critical sections are short
+ *  memory operations; the flusher copies to disk in kCopyChunk pieces, and it
+ *  waits on its own std::mutex. A holder preempted inside the lock spins the
+ *  taker until it yields. */
+class SpinLock
+{
+  public:
+    void lock() noexcept
+    {
+        for(int spins = 0; flag_.test_and_set(std::memory_order_acquire); ++spins)
+            if(spins == 64)
+            {
+                std::this_thread::yield();
+                spins = 0;
+            }
+    }
+    void unlock() noexcept { flag_.clear(std::memory_order_release); }
+
+  private:
+    std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
+};
+
+class SpinGuard
+{
+  public:
+    explicit SpinGuard(SpinLock& lock)
+    : lock_(lock)
+    {
+        lock_.lock();
+    }
+    ~SpinGuard() { lock_.unlock(); }
+    SpinGuard(const SpinGuard&)            = delete;
+    SpinGuard& operator=(const SpinGuard&) = delete;
+
+  private:
+    SpinLock& lock_;
+};
+
 class VirtualCard
 {
   public:
@@ -91,7 +132,7 @@ class VirtualCard
 
     // Unlinked files keep their slot: an open FIL may still hold the handle,
     // and it must not come to address a different file.
-    mutable std::mutex                           mutex_;
+    mutable SpinLock                             mutex_;
     std::string                                  key_; // the key a lookup builds, its capacity reused
     std::vector<std::unique_ptr<File>>           files_;
     std::unordered_map<std::string, int>         by_key_; // live files by key
@@ -99,6 +140,9 @@ class VirtualCard
     std::unordered_map<std::string, std::string> disk_names_; // key -> name to delete on disk
     std::unordered_map<std::string, std::string> dirs_;       // folders found on disk, key -> name
 
+    // The flusher's own wait, so the firmware's thread never touches a pthread
+    // mutex: quit_ and wake_ belong to this one, the data above to SpinLock.
+    std::mutex              waitMutex_;
     std::condition_variable wake_;
     bool                    quit_ = false;
     std::thread             flusher_;
