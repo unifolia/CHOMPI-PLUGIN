@@ -147,7 +147,7 @@ VirtualCard::VirtualCard(fs::path folder, std::string registry_key)
 VirtualCard::~VirtualCard()
 {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(waitMutex_);
         quit_ = true;
     }
     wake_.notify_all();
@@ -236,7 +236,7 @@ void VirtualCard::MarkDirty(const std::string& key)
 
 int VirtualCard::OpenFile(const char* name, bool create, bool truncate, uint32_t* size)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     KeyInto(key_, name);
     int idx = Lookup(key_);
 
@@ -267,7 +267,7 @@ int VirtualCard::OpenFile(const char* name, bool create, bool truncate, uint32_t
 
 uint32_t VirtualCard::Read(int handle, uint32_t pos, void* dst, uint32_t n)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     File*                       file = Find(handle);
     if(file == nullptr || pos >= file->data.size())
         return 0;
@@ -278,7 +278,7 @@ uint32_t VirtualCard::Read(int handle, uint32_t pos, void* dst, uint32_t n)
 
 void VirtualCard::Write(int handle, uint32_t pos, const void* src, uint32_t n)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     File*                       file = Find(handle);
     if(file == nullptr || !file->live) // unlinked while open: the data goes nowhere
         return;
@@ -291,7 +291,7 @@ void VirtualCard::Write(int handle, uint32_t pos, const void* src, uint32_t n)
 
 void VirtualCard::Resize(int handle, uint32_t size)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     File*                       file = Find(handle);
     if(file == nullptr || !file->live || file->data.size() == size)
         return;
@@ -301,7 +301,7 @@ void VirtualCard::Resize(int handle, uint32_t size)
 
 bool VirtualCard::Exists(const char* name, uint32_t* size)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     KeyInto(key_, name);
     const int idx = Lookup(key_);
     if(idx < 0)
@@ -313,14 +313,14 @@ bool VirtualCard::Exists(const char* name, uint32_t* size)
 
 bool VirtualCard::IsDir(const char* path)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     KeyInto(key_, path);
     return FolderExists(key_);
 }
 
 bool VirtualCard::MakeDir(const char* path)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     const std::string           key = KeyFor(path);
     if(FolderExists(key))
         return true;
@@ -365,7 +365,7 @@ std::string VirtualCard::DiskName(std::string_view path) const
 // the audio thread, a dozen files each.
 bool VirtualCard::NextEntry(const char* path, const char* after, DirEntry& out)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     KeyInto(key_, path);
     if(!FolderExists(key_))
         return false;
@@ -401,7 +401,7 @@ bool VirtualCard::NextEntry(const char* path, const char* after, DirEntry& out)
 
 bool VirtualCard::Unlink(const char* name)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     KeyInto(key_, name);
     const int idx = Lookup(key_);
     if(idx < 0)
@@ -418,7 +418,7 @@ bool VirtualCard::Unlink(const char* name)
 
 VirtualCard::RenameResult VirtualCard::Rename(const char* from, const char* to)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    SpinGuard                   lock(mutex_);
     const std::string           from_key = KeyFor(from);
     const std::string           to_key   = KeyFor(to);
     const int                   idx      = Lookup(from_key);
@@ -442,25 +442,28 @@ VirtualCard::RenameResult VirtualCard::Rename(const char* from, const char* to)
 
 void VirtualCard::FlusherLoop()
 {
-    std::unique_lock<std::mutex> lock(mutex_);
-    while(!quit_)
+    // Its own wait: the firmware's thread may take the card's SpinLock while
+    // this waits, and a condition_variable needs a pthread mutex.
+    std::unique_lock<std::mutex> wait(waitMutex_);
+    while(true)
     {
-        wake_.wait_for(lock, kFlushPoll);
+        wake_.wait_for(wait, kFlushPoll);
         if(quit_)
             break;
+        wait.unlock();
 
         std::vector<std::string> quiet;
-        const int64_t            now = NowMs();
-        for(const auto& [key, changed] : dirty_)
-            if(now - changed >= kQuietMs)
-                quiet.push_back(key);
+        {
+            SpinGuard     lock(mutex_);
+            const int64_t now = NowMs();
+            for(const auto& [key, changed] : dirty_)
+                if(now - changed >= kQuietMs)
+                    quiet.push_back(key);
+        }
 
-        if(quiet.empty())
-            continue;
-        lock.unlock();
         for(const auto& key : quiet)
             FlushKey(key);
-        lock.lock();
+        wait.lock();
     }
 }
 
@@ -472,7 +475,7 @@ void VirtualCard::FlushKey(const std::string& key)
     size_t      size   = 0;
     bool        remove = false;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SpinGuard                   lock(mutex_);
         if(dirty_.erase(key) == 0)
             return;
         const int idx = Lookup(key);
@@ -491,7 +494,7 @@ void VirtualCard::FlushKey(const std::string& key)
     std::vector<uint8_t> data(size);
     for(size_t pos = 0; pos < size; pos += kCopyChunk)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        SpinGuard                   lock(mutex_);
         const int                   idx = Lookup(key);
         if(idx < 0 || files_[size_t(idx)]->data.size() < size) // unlinked, renamed or shrunk meanwhile
             return;

@@ -52,13 +52,13 @@ warnings, and they stay open until fixed or accepted.
 |---|---|---|
 | `ausdk::AUMethodRender` | Apple's AudioUnitSDK locks a `recursive_mutex` in `AUBase::DoRender` on every render. Every AU built on it does this | Apple's SDK; same finding as Marcasite |
 | `JuceAU::Render` | JUCE's AUv2 wrapper takes `incomingMidiLock` around MIDI delivery | JUCE, upstream |
-| `emu::VirtualCard::{Exists,IsDir,OpenFile,Read}`, `ChompiProcessor::renderBlock` | the emulated SD card takes a `std::mutex` per file operation, and the firmware reads the card on the render thread; a background mirror holds the same lock | ours; needs a lock-free read path |
-| `ChompiProcessor::processBlock` | a `free` on the render thread. `tests/plugin_test.cpp` does not see it: its counter hooks `operator new/delete`, and this path reaches `malloc`/`free` | ours; to be located |
+| `emu::VirtualCard::{Exists,IsDir,OpenFile,Read}`, `ChompiProcessor::renderBlock` | **fixed in this PR**: the card used a `std::mutex` per file operation on the render thread; it now uses `emu::SpinLock`, and the flusher waits on its own `std::mutex`. Its exceptions are gone, so a reappearance fails CI | was ours |
+| `ChompiProcessor::processBlock` | a `free` on the render thread. Not reproduced in `tests/plugin_test.cpp` (its counter hooks `operator new/delete`; a `free` interposer on the same path saw none), so it follows host-side parameter traffic | ours; to be located |
 | `daisy_tape::{Engine::UpdateFileExists,FileCopier::NeedsOverwrite}` | the released CHOMPI firmware calls `sprintf` on the audio thread, and libc's `printf` frees internally | CHOMPI's firmware, which stays as released |
 
-Shipping with any of these open needs the owner's agreement; the first two
-need upstream fixes, the middle two are ours, and the last cannot change
-without diverging from the firmware.
+Shipping with any of these open needs the owner's agreement: the first two
+need upstream fixes, the `processBlock` free is ours and still open, and the
+last cannot change without diverging from the firmware.
 
 ## What no validator covers
 
