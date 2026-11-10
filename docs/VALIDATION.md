@@ -63,11 +63,14 @@ warnings, and they stay open until fixed or accepted.
 | `emu::VirtualCard::{Exists,IsDir,OpenFile,Read}`, `ChompiProcessor::renderBlock` | **fixed in PR #7**: the card used a `std::mutex` per file operation on the render thread; it now uses `emu::SpinLock`, and the flusher waits on its own `std::mutex`. Its exceptions are gone, so a reappearance fails CI | was ours |
 | `ChompiProcessor::processBlock` | a `free` on the render thread. Not reproduced in `tests/plugin_test.cpp` (its counter hooks `operator new/delete`; a `free` interposer on the same path saw none), so it follows host-side parameter traffic | ours; to be located |
 | clap-validator `state-invalid-random` | the CLAP reports a corrupt state as loaded: `juce::AudioProcessor::setStateInformation` returns void, so clap-juce-extensions cannot tell the host it refused it. CHIMPO ignores the bytes and keeps running | clap-juce-extensions, upstream |
+| clap-validator `process-audio-denormals` | a timing heuristic (denormal vs normal processing time) that fails on loaded CI runners — seen at 3.17× on Linux and again on Windows, green on rerun with the same binary. `processBlock` sets `juce::ScopedNoDenormals`, and the VST3 validator and pluginval pass. To be replaced by a measured flush-to-zero check | validator heuristic |
 | `daisy_tape::{Engine::UpdateFileExists,FileCopier::NeedsOverwrite}` | the released CHOMPI firmware calls `sprintf` on the audio thread, and libc's `printf` frees internally | CHOMPI's firmware, which stays as released |
 
-Shipping with any of these open needs the owner's agreement: the first two
-need upstream fixes, the `processBlock` free is ours and still open, and the
-last cannot change without diverging from the firmware.
+Shipping with any of these open needs the owner's agreement: the AudioUnitSDK
+and JUCE locks and the CLAP state load need upstream fixes, the `processBlock`
+free is ours and still open, the denormal test is a heuristic to replace with
+a measured check, and the firmware's `sprintf` cannot change without diverging
+from the firmware.
 
 ## What no validator covers
 

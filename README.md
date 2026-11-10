@@ -9,7 +9,7 @@ Club or Chase Bliss. I mean, the names are so different. CHOMPI is a trademark o
 ## Download
 
 Ready-built plugins are on the
-[Releases](https://github.com/unifolia/CHIMPO-PLUGIN/releases) page, with
+[Releases](https://github.com/unifolia/CHOMPI-PLUGIN/releases) page, with
 installers for each system: a `.pkg` for macOS 11+ (Apple Silicon and Intel,
 AU, VST3 and CLAP), a setup `.exe` for Windows 10+ (VST3 and CLAP), and a
 `.tar.gz` with `install.sh` for Linux x64 (VST3 and CLAP). The factory SD cards
