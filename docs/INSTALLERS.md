@@ -19,10 +19,17 @@ CLAP (`CHIMPO.clap.resources`), because a CLAP is a single file rather than a
 bundle; on macOS they live inside `CHIMPO.clap/Contents/Resources`.
 
 Each installer offers the formats as choices, all ticked, and refuses to
-install the licences alone. The tests check that the installed payload is
-byte-identical to the build, that a format can be unticked on reinstall
-(removing it), that the licences are the MIT text and the MIT + AGPL notice,
-and that an uninstall leaves nothing behind.
+install the licences alone. The macOS package adds a fourth, also ticked:
+**Remove older copies**, which moves any CHIMPO found outside `/Library` (an
+early test build in a user's own `~/Library`, say) into
+`/Library/Application Support/Bellcast Engineering/CHIMPO/removed installs`.
+Such a copy registers the same AU, VST3 and CLAP component ids, so a host sees
+two CHIMPOs or none: Logic listed neither until the stray copy was gone
+(2026-11-10). Unticked, they are left alone. The tests check that the installed
+payload is byte-identical to the build, that a format can be unticked on
+reinstall (removing it), that the older-copies option both moves them when
+ticked and leaves them when unticked, that the licences are the MIT text and
+the MIT + AGPL notice, and that an uninstall leaves nothing behind.
 
 ## Signing
 

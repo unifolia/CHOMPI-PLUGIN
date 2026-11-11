@@ -6,7 +6,7 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(CHIMPO VERSION 1.1.0 LANGUAGES C CXX)
+project(CHIMPO VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -174,10 +174,13 @@ if(CHIMPO_BUILD_PLUGIN)
 
     juce_add_plugin(Chimpo
         PRODUCT_NAME "CHIMPO"
-        COMPANY_NAME "CHIMPO"
+        COMPANY_NAME "Bellcast Engineering"
         BUNDLE_ID "io.github.chimpo.plugin"
-        # Never change: hosts find the plugin in saved projects by these codes.
-        PLUGIN_MANUFACTURER_CODE Cdaw
+        # Bellcast identity, as Marcasite and the other Bellcast plugins have: hosts group by
+        # manufacturer, and "Cdaw" (a CHOMPI-DAW leftover) put CHIMPO under a name nobody looks for.
+        # These codes are how a host finds the plugin in a saved project, so changing them again
+        # would orphan every session saved with these.
+        PLUGIN_MANUFACTURER_CODE Bcst
         PLUGIN_CODE Tap2
         FORMATS ${chimpo_juce_formats}
         IS_SYNTH TRUE

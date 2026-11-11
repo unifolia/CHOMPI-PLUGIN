@@ -34,6 +34,7 @@ ARTEFACTS = ROOT / "build" / "Chimpo_artefacts" / "Release"
 PLUGINS = Path("/Library/Audio/Plug-Ins")
 VENDOR = Path("/Library/Application Support/Bellcast Engineering")
 LICENCES = VENDOR / "CHIMPO"
+QUARANTINE = LICENCES / "removed installs"
 BUNDLES = {  # Installer choice: (installed, built)
     "component": (PLUGINS / "Components/CHIMPO.component", ARTEFACTS / "AU/CHIMPO.component"),
     "vst3": (PLUGINS / "VST3/CHIMPO.vst3", ARTEFACTS / "VST3/CHIMPO.vst3"),
@@ -78,10 +79,14 @@ def check_choices(pkg: Path) -> None:
         c = found.get(choice)
         if not c or not (c["choiceIsVisible"] and c["choiceIsEnabled"] and c["choiceIsSelected"]):
             vf.fail(f"Installer does not offer {choice}, ticked by default: {c}")
+    c = found.get("cleanup")
+    if not c or not (c["choiceIsVisible"] and c["choiceIsEnabled"] and c["choiceIsSelected"]):
+        vf.fail(f"Installer does not offer to remove older copies, ticked by default: {c}")
     c = found.get("licenses")
     if not c or not c["choiceIsSelected"] or c["choiceIsEnabled"] or c["choiceIsVisible"]:
         vf.fail(f"the licences are not a fixed, hidden choice: {c}")
-    print("Choices OK: " + ", ".join(BUNDLES) + ", all ticked; licences always installed")
+    print("Choices OK: " + ", ".join(BUNDLES) + " and removing older copies, all ticked; "
+          "licences always installed")
 
 
 def install(pkg: Path, untick: tuple = ()) -> None:
@@ -119,10 +124,43 @@ def check_installed(formats: tuple) -> None:
     for mark in ("GNU Affero General Public License", "github.com/unifolia/CHOMPI-PLUGIN"):
         if mark not in notice_text:
             vf.fail(f"the installed NOTICE.txt does not mention {mark!r}")
-    want = {RECEIPT + c: VERSION for c in (*formats, "licenses")}
+    want = {RECEIPT + c: VERSION for c in (*formats, "licenses", "cleanup")}
     if receipts() != want:
         vf.fail(f"receipts {receipts()}, expected {want}")
     print(f"Installed OK: {', '.join(formats)} and the licences, version {VERSION}")
+
+
+def check_older_copies(pkg: Path) -> None:
+    """An older CHIMPO outside /Library claims the same component ids, so a host
+    lists two CHIMPOs or none. Ticked, the installer moves it aside; unticked, it
+    leaves it alone. (Logic listed neither, 2026-11-10.)"""
+    stale = [Path.home() / "Library/Audio/Plug-Ins" / rel for rel in
+             ("Components/CHIMPO.component", "VST3/CHIMPO.vst3", "CLAP/CHIMPO.clap")]
+    made_dirs = []
+    for path in stale:
+        if path.exists():
+            vf.fail(f"{path} exists already; this test creates a stand-in and would move it")
+        for parent in reversed(path.parents):
+            if not parent.exists():
+                made_dirs.append(parent)
+        (path / "Contents").mkdir(parents=True)
+    try:
+        install(pkg, untick=("cleanup",))
+        if not all(path.exists() for path in stale):
+            vf.fail("the older copies were moved although the option was unticked")
+        install(pkg)
+        if any(path.exists() for path in stale):
+            vf.fail("the installer left an older copy in place with the option ticked: "
+                    + ", ".join(str(p) for p in stale if p.exists()))
+        moved = sorted(QUARANTINE.rglob("CHIMPO.*"))
+        if len(moved) != len(stale):
+            vf.fail(f"expected the older copies under {QUARANTINE}, found {moved}")
+        print(f"Older copies OK: moved {len(moved)} to {QUARANTINE}")
+    finally:
+        # The moved copies took their Contents with them; drop the folders this
+        # test created so the runner is as it was.
+        for path in sorted(set(made_dirs), key=lambda p: len(p.parts), reverse=True):
+            subprocess.run(["rmdir", str(path)], stderr=subprocess.DEVNULL)
 
 
 def check_au() -> None:
@@ -159,6 +197,7 @@ def main() -> None:
         check_installed(("clap",))
         install(pkgs[0])
         check_installed(tuple(BUNDLES))
+        check_older_copies(pkgs[0])
         check_au()
     finally:
         uninstall(had_vendor)

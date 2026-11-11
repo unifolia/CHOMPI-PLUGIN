@@ -23,6 +23,7 @@ lowered for a local run: CHIMPO_AUVAL_PASSES=1 CHIMPO_AUVAL_STRESS=60.
 Usage: python3 scripts/validate_au.py [--only auval,auval-oop,auval-rt,pluginval-au]
 """
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -36,7 +37,20 @@ from validate_formats import Failure
 SOURCE = vf.AU
 COMPONENTS = Path.home() / "Library" / "Audio" / "Plug-Ins" / "Components"
 TARGET = COMPONENTS / "CHIMPO.component"
-AUVAL = ["auval", "-v", "aumu", "Tap2", "Cdaw", "-strict"]
+
+
+def component_ids(bundle: Path) -> tuple[str, str, str]:
+    """The AU's type, subtype and manufacturer, read from the bundle that this
+    run installs: CHIMPO's identity moved from Cdaw to Bcst, and a validator
+    that hard-codes it would then test nothing (or the wrong plugin)."""
+    with open(bundle / "Contents" / "Info.plist", "rb") as handle:
+        components = plistlib.load(handle)["AudioComponents"]
+    first = components[0]
+    return first["type"], first["subtype"], first["manufacturer"]
+
+
+AUTYPE, AUSUBTYPE, AUMANUFACTURER = component_ids(SOURCE)
+AUVAL = ["auval", "-v", AUTYPE, AUSUBTYPE, AUMANUFACTURER, "-strict"]
 PASSES = int(os.environ.get("CHIMPO_AUVAL_PASSES", "3"))
 STRESS_SECONDS = os.environ.get("CHIMPO_AUVAL_STRESS", "600")
 BINARY = "CHIMPO"
@@ -59,7 +73,8 @@ def check_registration(target: Path = TARGET) -> None:
         listing = subprocess.run(["auval", "-l"], capture_output=True, text=True,
                                  encoding="utf-8", errors="replace").stdout
         found = [Path(url.removeprefix("file://").rstrip("/"))
-                 for url in re.findall(r"^aumu Tap2 Cdaw .*\((file://[^)]*)\)", listing, re.M)]
+                 for url in re.findall(rf"^{AUTYPE} {AUSUBTYPE} {AUMANUFACTURER} .*\((file://[^)]*)\)",
+                                       listing, re.M)]
         others = [str(p) for p in found if p != target]
         if others:
             vf.fail("another CHIMPO AU is installed, so this run would not test the build: "
@@ -67,7 +82,7 @@ def check_registration(target: Path = TARGET) -> None:
         if target in found:
             return
         if time.monotonic() > deadline:
-            listed = [line for line in listing.splitlines() if "Tap2" in line] or ["no CHIMPO AU"]
+            listed = [line for line in listing.splitlines() if AUSUBTYPE in line] or ["no CHIMPO AU"]
             signature = subprocess.run(["codesign", "--verify", "--deep", str(target)],
                                        capture_output=True, text=True, errors="replace")
             vf.fail(f"the system did not register {target} within {REGISTRATION_WAIT_S} s.\n"

@@ -102,6 +102,17 @@ pkgbuild --quiet --root "$p/licenses" \
     --install-location "/Library/Application Support/Bellcast Engineering/CHIMPO" \
     "$work/components/chimpo-licenses.pkg"
 
+# "Remove older copies": an older CHIMPO outside /Library (an early test build in
+# a user Library, say) registers the same component ids as this package, and a
+# host can then show two CHIMPOs or none — Logic showed neither (2026-11-10).
+# This package is a hidden-from-nobody choice, ticked by default, whose script
+# moves any such copy aside.
+mkdir -p "$work/cleanup-scripts"
+install -m 755 scripts/macos/cleanup-postinstall.sh "$work/cleanup-scripts/postinstall"
+pkgbuild --quiet --nopayload --scripts "$work/cleanup-scripts" \
+    --identifier engineering.bellcast.chimpo.pkg.cleanup --version "$version" \
+    "$work/components/chimpo-cleanup.pkg"
+
 # The licence Installer asks the user to accept: the MIT terms plus the AGPL
 # notice for JUCE, one line per paragraph so Installer wraps it to its width.
 python3 scripts/licence_page.py --width 0 "$work/resources/NOTICE.txt"
@@ -117,11 +128,13 @@ cat > "$work/distribution.xml" <<EOF
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <volume-check><allowed-os-versions><os-version min="11.0"/></allowed-os-versions></volume-check>
     <choices-outline>
+        <line choice="cleanup"/>
         <line choice="component"/>
         <line choice="vst3"/>
         <line choice="clap"/>
         <line choice="licenses"/>
     </choices-outline>
+    <choice id="cleanup" title="Remove older copies" description="An earlier CHIMPO outside /Library (an early test build in your own Library, say) claims the same AU, VST3 and CLAP ids, and a host can then list two CHIMPOs or none. Ticked, any such copy is moved to /Library/Application Support/Bellcast Engineering/CHIMPO/removed installs; untick to leave them where they are." selected="true">$(ref cleanup)</choice>
     <choice id="component" title="Audio Unit" description="For Logic Pro, GarageBand and other AU hosts. Installs to /Library/Audio/Plug-Ins/Components.">$(ref component)</choice>
     <choice id="vst3" title="VST3" description="For VST3 hosts such as Ableton Live, Cubase and Reaper. Installs to /Library/Audio/Plug-Ins/VST3.">$(ref vst3)</choice>
     <choice id="clap" title="CLAP" description="For CLAP hosts such as Bitwig Studio and Reaper. Installs to /Library/Audio/Plug-Ins/CLAP.">$(ref clap)</choice>
