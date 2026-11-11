@@ -105,12 +105,16 @@ pkgbuild --quiet --root "$p/licenses" \
 # "Remove older copies": an older CHIMPO outside /Library (an early test build in
 # a user Library, say) registers the same component ids as this package, and a
 # host can then show two CHIMPOs or none — Logic showed neither (2026-11-10).
-# This package is a hidden-from-nobody choice, ticked by default, whose script
-# moves any such copy aside.
-mkdir -p "$work/cleanup-scripts"
+# This choice is ticked by default and its script moves any such copy aside.
+# The package carries a README, and that is not decoration: pkgbuild
+# --nopayload packages get no receipt and Installer skips them silently (CI
+# caught exactly that), so the payload is what makes the scripts run.
+mkdir -p "$work/cleanup-scripts" "$p/cleanup"
 install -m 755 scripts/macos/cleanup-postinstall.sh "$work/cleanup-scripts/postinstall"
-pkgbuild --quiet --nopayload --scripts "$work/cleanup-scripts" \
+install -m 644 scripts/macos/cleanup-README.txt "$p/cleanup/README.txt"
+pkgbuild --quiet --root "$p/cleanup" --scripts "$work/cleanup-scripts" \
     --identifier engineering.bellcast.chimpo.pkg.cleanup --version "$version" \
+    --install-location "/Library/Application Support/Bellcast Engineering/CHIMPO/removed installs" \
     "$work/components/chimpo-cleanup.pkg"
 
 # The licence Installer asks the user to accept: the MIT terms plus the AGPL

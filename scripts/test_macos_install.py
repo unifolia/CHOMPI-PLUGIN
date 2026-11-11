@@ -114,6 +114,9 @@ def check_installed(formats: tuple) -> None:
     same(LICENCES / "LICENSE", ROOT / "LICENSE")
     same(LICENCES / "THIRD_PARTY.md", ROOT / "THIRD_PARTY.md")
     same(LICENCES / "notices", ROOT / "target/notices")
+    # The cleanup package's README is how we know that choice installed: a
+    # payload-less package gets no receipt and Installer skips it silently.
+    same(QUARANTINE / "README.txt", ROOT / "scripts/macos/cleanup-README.txt")
     # CHIMPO's own licence is the MIT text; the notice must name the AGPLv3
     # (these builds link JUCE under it) and where the source is.
     licence = (LICENCES / "LICENSE").read_text(encoding="utf-8")
